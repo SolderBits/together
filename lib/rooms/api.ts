@@ -86,7 +86,13 @@ export class RoomSession {
     await transport.connect();
 
     const existing = await transport.readState();
-    if (!existing && !options.asHost) {
+
+    // Whether a room exists is knowable up front only on the local transport,
+    // which answers from this browser's own storage. A hosted transport does
+    // not know until it has asked the server — and asking *is* the join, since
+    // a room is readable only by its members. So the check moves into
+    // `ensureRoom` below, which fails for the same reason with the same result.
+    if (!existing && !options.asHost && transport.kind === "local") {
       await transport.disconnect();
       throw new RoomNotFoundError(options.code);
     }
@@ -104,7 +110,19 @@ export class RoomSession {
       players: { ...base.players, [options.identity.id]: me },
     };
 
-    session.state = await transport.ensureRoom(seeded);
+    try {
+      session.state = await transport.ensureRoom(seeded);
+    } catch (error) {
+      await transport.disconnect();
+      // The server's refusal is deliberately the same whether the code never
+      // existed or has expired, so both arrive here as "not found" — which is
+      // exactly what the person typing a code needs to be told.
+      if (/no such room|not found/i.test(String((error as Error)?.message))) {
+        throw new RoomNotFoundError(options.code);
+      }
+      throw error;
+    }
+
     if (existing) {
       // Register (or refresh) ourselves in an already-existing room.
       await transport.patchState({ players: { [options.identity.id]: me } });

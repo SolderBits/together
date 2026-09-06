@@ -34,7 +34,9 @@ export async function migrate(connectionString = process.env.DATABASE_URL, { qui
     // it needs their CA, which is not worth a bundled root store here. The
     // connection is still encrypted.
     ssl: /localhost|127\.0\.0\.1/.test(connectionString) ? false : { rejectUnauthorized: false },
-    max: 2,
+    // One is all this needs: the advisory lock serialises runners anyway, and a
+    // second idle connection is one more thing for a small database to refuse.
+    max: 1,
   });
 
   const client = await pool.connect();

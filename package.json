@@ -4,8 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
+    "build": "next build && node scripts/build-server.mjs",
+    "start": "node dist/server.mjs",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "test:rls": "node supabase/rls.test.mjs",
@@ -18,7 +18,8 @@
     "test:realtime": "NODE_OPTIONS=--conditions=react-server tsx lib/server/ws/realtime.test.mts",
     "test:transport": "NODE_OPTIONS=--conditions=react-server tsx lib/realtime/railway-transport.test.mts",
     "test:media": "NODE_OPTIONS=--conditions=react-server tsx lib/server/storage/media.test.mts",
-    "test:photobooth": "NODE_OPTIONS=--conditions=react-server tsx lib/media/photobooth-flow.test.mts"
+    "test:photobooth": "NODE_OPTIONS=--conditions=react-server tsx lib/media/photobooth-flow.test.mts",
+    "dev:railway": "NODE_OPTIONS=--conditions=react-server tsx scripts/dev-railway.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1127.0",

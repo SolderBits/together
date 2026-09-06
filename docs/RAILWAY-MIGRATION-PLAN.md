@@ -692,7 +692,7 @@ Approved with decisions A–F as proposed. Updated as each stage lands.
 | 6 | R2 media storage + signed URLs | ☑ done |
 | 7 | Photobooth thumbnail flow (Decision F) | ☑ done |
 | 8 | Remove decorative email/Google sign-in (Decision D) | ☑ done |
-| 9 | Connect experiences to the new transport | ☐ |
+| 9 | Connect experiences to the new transport | ☑ done |
 | 10 | Integration + security test suite | ☐ |
 | 11 | Full local suite green | ☐ |
 | 12 | Deploy staging instance to Railway | ☐ |

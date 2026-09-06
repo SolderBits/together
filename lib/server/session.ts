@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { createSession, loadSession, touchSession } from "./db/sessions";
 import type { SessionContext } from "./db/authz";
 import { SESSION_COOKIE, cookieOptions, mintToken, verifyToken } from "./session-token";
+import { sessionFromCookieHeader } from "./session-cookie";
 
 /**
  * Anonymous guest sessions, as the request layer sees them.
@@ -23,6 +24,7 @@ import { SESSION_COOKIE, cookieOptions, mintToken, verifyToken } from "./session
  */
 
 export { SESSION_COOKIE, cookieOptions, mintToken, verifyToken };
+export { sessionFromCookieHeader };
 
 /**
  * The caller's identity, or null.
@@ -65,26 +67,3 @@ export async function currentOrNewSession(): Promise<{
   return { ctx: { sessionId: row.id }, freshToken: await mintToken(row.id) };
 }
 
-/**
- * Identity for a WebSocket upgrade, where there is no Next.js cookie store —
- * only the raw `Cookie` header on the HTTP request that becomes the socket.
- */
-export async function sessionFromCookieHeader(
-  header: string | undefined,
-): Promise<SessionContext | null> {
-  if (!header) return null;
-
-  const token = header
-    .split(";")
-    .map((part) => part.trim())
-    .find((part) => part.startsWith(`${SESSION_COOKIE}=`))
-    ?.slice(SESSION_COOKIE.length + 1);
-
-  if (!token) return null;
-
-  const sessionId = await verifyToken(decodeURIComponent(token));
-  if (!sessionId) return null;
-
-  const row = await loadSession(sessionId);
-  return row ? { sessionId } : null;
-}

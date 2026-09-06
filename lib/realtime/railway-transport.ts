@@ -4,6 +4,7 @@ import type { RoomEvent, RoomState, RoomStatePatch } from "@/lib/rooms/types";
 import { uid } from "@/lib/utils";
 import { WriteQueue } from "./queue";
 import { applyPatch, type PresenceUpdate, type RoomTransport } from "./transport";
+import { setConnectionState } from "./connection-status";
 
 /**
  * The Railway transport.
@@ -55,6 +56,43 @@ export interface RailwayTransportOptions {
   origin?: string;
 }
 
+/**
+ * One session per browser, however many transports ask for one at once.
+ *
+ * Establishing a guest identity is a write, and it is idempotent only if the
+ * caller already has the cookie. Two requests that start before either has
+ * finished both look like a first visit, so both mint a session — and the
+ * browser keeps whichever `Set-Cookie` landed last, which may not be the one
+ * that now owns the seat in the room the other request created.
+ *
+ * That is not hypothetical: React's development double-mount reproduces it on
+ * every first room, and a slow first paint would reproduce it in production.
+ * Sharing the in-flight promise makes concurrent callers wait for one answer.
+ */
+let sessionInFlight: Promise<void> | null = null;
+
+async function ensureSession(http: typeof fetch, origin: string): Promise<void> {
+  sessionInFlight ??= (async () => {
+    try {
+      const response = await http(`${origin}/api/session`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!response.ok) throw new Error(`session ${response.status}`);
+    } finally {
+      // Cleared either way: a failure should be retried, not cached.
+      sessionInFlight = null;
+    }
+  })();
+
+  return sessionInFlight;
+}
+
+/** Only for tests, which run several browsers in one process. */
+export function resetSessionState() {
+  sessionInFlight = null;
+}
+
 export class RailwayConnectionError extends Error {
   constructor(message: string, readonly cause?: unknown) {
     super(message);
@@ -84,6 +122,7 @@ export class RailwayRoomTransport implements RoomTransport {
   private closing = false;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private resubscribing = false;
 
   /** Resolvers waiting on a specific frame — how request/response is done over a socket. */
   private waiters = new Set<{ match: (f: ServerFrame) => boolean; resolve: (f: ServerFrame) => void }>();
@@ -102,12 +141,12 @@ export class RailwayRoomTransport implements RoomTransport {
   // --- connection -----------------------------------------------------------
 
   async connect(): Promise<void> {
+    setConnectionState("connecting");
     // A guest identity must exist before the upgrade, because the upgrade is
-    // where it is checked.
-    await this.http(`${this.origin}/api/session`, {
-      method: "POST",
-      credentials: "include",
-    }).catch((error) => {
+    // where it is checked — and before any room call, because a room is owned
+    // by a session.
+    await ensureSession(this.http, this.origin).catch((error) => {
+      setConnectionState("failed");
       throw new RailwayConnectionError("Could not reach the server to start a session.", error);
     });
 
@@ -133,6 +172,12 @@ export class RailwayRoomTransport implements RoomTransport {
       const onOpen = () => {
         this.socket = socket;
         this.reconnectAttempt = 0;
+        setConnectionState("connected");
+        // Exposed only outside production, so a dropped connection can be
+        // reproduced from a console or a test without reaching into React.
+        if (process.env.NODE_ENV !== "production") {
+          (globalThis as { __togetherSocket?: WebSocket }).__togetherSocket = socket;
+        }
         settle(resolve);
       };
 
@@ -140,6 +185,7 @@ export class RailwayRoomTransport implements RoomTransport {
       // a configuration or session problem, and it is reported as one rather
       // than quietly leaving the room empty.
       const onOpenError = () => {
+        setConnectionState("failed");
         settle(() =>
           reject(
             new RailwayConnectionError(
@@ -166,7 +212,13 @@ export class RailwayRoomTransport implements RoomTransport {
 
   private onSocketClosed() {
     this.socket = null;
-    if (this.closing) return;
+    if (this.closing) {
+      setConnectionState("local");
+      return;
+    }
+    // Dropped, not closed by us. The session survives; the state is stale until
+    // the next subscribe lands.
+    setConnectionState("reconnecting");
 
     // Reconnect with backoff. The subscription is re-established on the new
     // socket, which is the same path a late joiner takes — so reconnecting and
@@ -283,6 +335,30 @@ export class RailwayRoomTransport implements RoomTransport {
     for (const waiter of [...this.waiters]) {
       if (waiter.match(frame)) waiter.resolve(frame);
     }
+
+    // A `denied` with no request behind it means the server no longer counts
+    // this socket as subscribed while we still think it is. That happens when
+    // another connection took the seat — a duplicate tab, an overlapping
+    // reconnect, or two mounts racing — and the survivor is left holding a
+    // socket that is open and silent. Re-subscribing is the recovery, and the
+    // server will refuse it if the seat genuinely belongs to someone else.
+    if (frame.t === "denied" && !frame.rid && this.subscribed && !this.closing) {
+      void this.resubscribe();
+    }
+  }
+
+  private async resubscribe(): Promise<void> {
+    if (this.resubscribing) return;
+    this.resubscribing = true;
+    try {
+      await this.subscribe();
+    } catch {
+      // The seat really is not ours. Stop claiming otherwise.
+      this.subscribed = false;
+      setConnectionState("failed");
+    } finally {
+      this.resubscribing = false;
+    }
   }
 
   // --- rooms ----------------------------------------------------------------
@@ -333,6 +409,7 @@ export class RailwayRoomTransport implements RoomTransport {
     }
 
     this.subscribed = true;
+    setConnectionState("connected");
     if (frame.state) {
       this.lastKnown = frame.state;
       this.version = frame.version ?? this.version;

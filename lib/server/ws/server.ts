@@ -4,7 +4,7 @@ import type { Duplex } from "node:stream";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { RoomState } from "@/lib/rooms/types";
-import { sessionFromCookieHeader } from "@/lib/server/session";
+import { sessionFromCookieHeader } from "@/lib/server/session-cookie";
 import { AuthzError, type SessionContext } from "@/lib/server/db/authz";
 import {
   markOffline,
@@ -260,21 +260,40 @@ async function onPresence(
 
 // --- lifecycle --------------------------------------------------------------
 
+/**
+ * Removes a connection from a room.
+ *
+ * `heldSeat` says whether *this* connection was the one holding the seat when
+ * it left. It matters because a superseded socket must not speak for a seat it
+ * no longer holds — see `onClose`.
+ */
 function detach(conn: Connection, code: string) {
   const membership = conn.rooms.get(code);
   conn.rooms.delete(code);
   subscribers.get(code)?.delete(conn);
   if (!subscribers.get(code)?.size) subscribers.delete(code);
-  if (membership && seats.get(seatKey(code, membership.playerId)) === conn) {
-    seats.delete(seatKey(code, membership.playerId));
-  }
-  return membership;
+
+  const heldSeat = Boolean(
+    membership && seats.get(seatKey(code, membership.playerId)) === conn,
+  );
+  if (heldSeat && membership) seats.delete(seatKey(code, membership.playerId));
+
+  return membership ? { ...membership, heldSeat } : null;
 }
 
 async function onClose(conn: Connection) {
   for (const code of [...conn.rooms.keys()]) {
     const membership = detach(conn, code);
     if (!membership) continue;
+
+    // A socket that was already superseded is not the seat's voice any more.
+    // Without this check, a replaced connection closing marks its former seat
+    // offline *after* the replacement has announced itself — so the player
+    // vanishes from the room while sitting there connected. React's
+    // development double-mount reproduces it on every room; a reconnect that
+    // overlaps its predecessor would reproduce it in production.
+    if (!membership.heldSeat) continue;
+
     try {
       // Zeroing the heartbeat is how a deliberate exit is signalled; the room
       // sees them gone at once rather than waiting out the presence window.

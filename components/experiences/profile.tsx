@@ -9,6 +9,7 @@ import { Modal } from "@/components/ui/modal";
 import { AuthPanel } from "@/components/auth/auth-panel";
 import { IDENTITY_EMOJIS, getIdentity, updateIdentity } from "@/lib/rooms/identity";
 import { realtimeBackendName } from "@/lib/realtime";
+import { useConnectionState } from "@/lib/realtime/use-connection";
 import { recentRooms } from "@/lib/rooms/api";
 import type { PlayerIdentity } from "@/lib/rooms/types";
 import { cn, formatDate } from "@/lib/utils";
@@ -51,6 +52,82 @@ export function Profile() {
   const [rooms, setRooms] = useState<ReturnType<typeof recentRooms>>([]);
   const [confirmClear, setConfirmClear] = useState(false);
   const [usage, setUsage] = useState(0);
+  const [reachable, setReachable] = useState<boolean | null>(null);
+  const live = useConnectionState();
+
+  /**
+   * Whether the server is actually answering — asked, not assumed.
+   *
+   * A configured backend and a working one are different things, and this page
+   * is usually opened outside a room where there is no socket to observe. One
+   * cheap request is the difference between reporting what is true and
+   * reporting what was set at build time.
+   */
+  useEffect(() => {
+    if (backend !== "railway") return;
+    let cancelled = false;
+    // `no-store` on both sides: a cached answer would report the last time the
+    // server was reachable as though it were now.
+    void fetch("/api/health", { credentials: "include", cache: "no-store" })
+      .then((r) => r.json())
+      .then((body: { ok?: boolean }) => !cancelled && setReachable(Boolean(body?.ok)))
+      .catch(() => !cancelled && setReachable(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [backend]);
+
+  /**
+   * What to say about the connection.
+   *
+   * Never "connected" merely because a URL is configured: inside a room the
+   * live socket state decides, and outside one the health check does.
+   */
+  const connection = ((): { label: string; detail: string; tone: "good" | "info" | "warn" } => {
+    if (backend !== "railway") {
+      return {
+        label: "Realtime: this device",
+        detail:
+          "Rooms run in this browser, so they sync between tabs and windows on this machine — " +
+          "enough to try everything, with nothing to set up.",
+        tone: "info",
+      };
+    }
+
+    if (live === "connecting" || reachable === null) {
+      return {
+        label: "Realtime: connecting",
+        detail: "Reaching the server that keeps the two of you in step.",
+        tone: "info",
+      };
+    }
+
+    if (live === "reconnecting") {
+      return {
+        label: "Realtime: reconnecting",
+        detail:
+          "The connection dropped and is being picked back up. Nothing is lost — the room is " +
+          "waiting where you left it.",
+        tone: "warn",
+      };
+    }
+
+    if (live === "failed" || reachable === false) {
+      return {
+        label: "Realtime: can't connect",
+        detail:
+          "The server isn't answering right now, so rooms won't sync across devices. This " +
+          "usually sorts itself out; if it doesn't, it's worth checking back shortly.",
+        tone: "warn",
+      };
+    }
+
+    return {
+      label: live === "connected" ? "Realtime: connected" : "Realtime: ready",
+      detail: "Rooms sync live, so the two of you can be anywhere.",
+      tone: "good",
+    };
+  })();
 
   useEffect(() => {
     setIdentity(getIdentity());
@@ -170,16 +247,10 @@ export function Profile() {
             Connection
           </p>
           <div className="flex flex-wrap gap-2">
-            <Pill tone={backend === "supabase" ? "good" : "info"}>
-              Realtime: {backend === "supabase" ? "Supabase" : "this browser"}
-            </Pill>
+            <Pill tone={connection.tone}>{connection.label}</Pill>
             <Pill>{Math.round(usage / 1024)} KB saved locally</Pill>
           </div>
-          <p className="t-body-sm mt-4">
-            {backend === "supabase"
-              ? "Rooms sync through Supabase Realtime, so the two of you can be anywhere."
-              : "No backend is configured, so rooms sync between tabs and windows on this machine. Add Supabase keys to play across devices — see .env.example."}
-          </p>
+          <p className="t-body-sm mt-4">{connection.detail}</p>
         </div>
 
         {rooms.length > 0 && (

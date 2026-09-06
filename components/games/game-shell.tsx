@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { RoomCode } from "@/components/room/room-code";
 import { ShareDialog } from "@/components/room/share-dialog";
 import { useRoom } from "@/components/room/room-provider";
+import { useConnectionState } from "@/lib/realtime/use-connection";
 import { inviteLink } from "@/lib/rooms/api";
 import { getExperience, paletteVars } from "@/lib/experiences";
 import { cn } from "@/lib/utils";
