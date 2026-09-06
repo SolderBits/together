@@ -45,10 +45,6 @@ export function pool(): pg.Pool {
   return globalThis.__togetherPool;
 }
 
-export function databaseConfigured() {
-  return Boolean(process.env.DATABASE_URL);
-}
-
 /**
  * A parameterised query. There is no variant that takes interpolated SQL, and
  * `text` is only ever a literal written in this directory — user input reaches
