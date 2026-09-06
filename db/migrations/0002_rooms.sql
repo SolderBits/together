@@ -33,19 +33,26 @@ create index if not exists rooms_expiry_idx  on rooms (updated_at);
 
 -- Membership. Written only by the join path, never by a client request that
 -- carries its own idea of who it is.
+--
+-- The seat is the primary key, not the session, because one browser can hold
+-- two seats: the player id lives in sessionStorage and is deliberately per-tab,
+-- so two tabs on one machine behave like two devices. That is how the whole
+-- project is developed and tested. Keying on the session instead would make the
+-- second tab steal the first one's seat.
+--
+-- `session_id` is the ownership column: it decides whether a given browser may
+-- speak for a given seat.
 create table if not exists room_members (
   room_id    uuid not null references rooms(id) on delete cascade,
-  session_id uuid not null references sessions(id) on delete cascade,
   player_id  text not null check (player_id ~ '^[A-Za-z0-9_-]{1,64}$'),
+  session_id uuid not null references sessions(id) on delete cascade,
   role       text not null default 'guest' check (role in ('host','guest')),
   joined_at  timestamptz not null default now(),
-  primary key (room_id, session_id)
+  primary key (room_id, player_id)
 );
 
 create index if not exists room_members_room_idx    on room_members (room_id);
-create index if not exists room_members_session_idx on room_members (session_id);
--- One seat per player id within a room, whichever session holds it.
-create unique index if not exists room_members_seat_idx on room_members (room_id, player_id);
+create index if not exists room_members_session_idx on room_members (room_id, session_id);
 
 -- Presence. High-churn, small rows, never part of the room document.
 create table if not exists room_players (

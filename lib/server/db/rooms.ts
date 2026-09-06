@@ -2,7 +2,12 @@ import "server-only";
 import type { RoomPlayer, RoomState } from "@/lib/rooms/types";
 import { PRESENCE_TIMEOUT_MS } from "@/lib/rooms/types";
 import { query, transaction } from "./pool";
-import { AuthzError, assertRoomMemberByCode, type SessionContext } from "./authz";
+import {
+  AuthzError,
+  assertRoomMemberByCode,
+  assertRoomSeatByCode,
+  type SessionContext,
+} from "./authz";
 
 /**
  * Every room operation the server performs.
@@ -62,9 +67,9 @@ export async function createRoom(
     );
 
     await client.query(
-      `insert into room_members (room_id, session_id, player_id, role)
+      `insert into room_members (room_id, player_id, session_id, role)
        values ($1, $2, $3, 'host')`,
-      [room.rows[0].id, ctx.sessionId, playerId],
+      [room.rows[0].id, playerId, ctx.sessionId],
     );
 
     return {
@@ -107,8 +112,9 @@ export async function joinRoom(
 
     const room = found.rows[0];
 
-    // A seat is held by one session. Re-joining with the same session keeps it;
-    // a different session cannot take a player id that is already claimed.
+    // A seat belongs to one session. Re-joining from the same browser keeps it —
+    // that is what makes a refresh return you to your own seat — but another
+    // browser cannot take a player id that is already claimed.
     const seat = await client.query<{ session_id: string }>(
       `select session_id from room_members where room_id = $1 and player_id = $2`,
       [room.id, playerId],
@@ -118,11 +124,11 @@ export async function joinRoom(
     }
 
     await client.query(
-      `insert into room_members (room_id, session_id, player_id, role)
+      `insert into room_members (room_id, player_id, session_id, role)
        values ($1, $2, $3, $4)
-       on conflict (room_id, session_id)
-         do update set player_id = excluded.player_id`,
-      [room.id, ctx.sessionId, playerId, room.host_id === playerId ? "host" : "guest"],
+       on conflict (room_id, player_id)
+         do update set session_id = excluded.session_id`,
+      [room.id, playerId, ctx.sessionId, room.host_id === playerId ? "host" : "guest"],
     );
 
     return { id: room.id, code, state: room.state, version: Number(room.version) };
@@ -166,12 +172,15 @@ export type PatchOutcome =
  */
 export async function patchRoom(
   ctx: SessionContext,
-  input: { code: string; version: number; state: RoomState },
+  input: { code: string; playerId: string; version: number; state: RoomState },
 ): Promise<PatchOutcome> {
   const code = requireCode(input.code);
+  const asPlayer = requirePlayerId(input.playerId);
 
   return transaction(async (client) => {
-    const { roomId, playerId } = await assertRoomMemberByCode(ctx, code, client);
+    // Not "are you in this room" but "are you this player in this room" — a
+    // member must not be able to write a host handover naming someone else.
+    const { roomId, playerId } = await assertRoomSeatByCode(ctx, code, asPlayer, client);
 
     const current = await client.query<{ state: RoomState; version: string; host_id: string }>(
       `select state, version, host_id from rooms where id = $1 for update`,
@@ -273,10 +282,11 @@ export async function touchPresence(
   input: { code: string; playerId: string; name?: string; emoji?: string; ready?: boolean },
 ): Promise<void> {
   const code = requireCode(input.code);
-  const { roomId, playerId } = await assertRoomMemberByCode(ctx, code);
+  const asPlayer = requirePlayerId(input.playerId);
 
-  // The seat comes from `room_members`, not from the request — a member cannot
-  // beat on behalf of another player.
+  // The seat is verified against `room_members`, so a member cannot beat on
+  // behalf of another player even though they name the player themselves.
+  const { roomId, playerId } = await assertRoomSeatByCode(ctx, code, asPlayer);
   await query(
     `insert into room_players (room_id, player_id, session_id, name, emoji, ready, last_seen)
      values ($1, $2, $3, coalesce($4, 'Guest'), coalesce($5, '🌸'), coalesce($6, false), now())

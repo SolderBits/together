@@ -10,11 +10,12 @@
     "typecheck": "tsc --noEmit",
     "test:rls": "node supabase/rls.test.mjs",
     "test:election": "tsx lib/rooms/election.test.ts",
-    "test": "npm run check:db && npm run test:session && npm run test:election && npm run test:rls",
+    "test": "npm run check:db && npm run test:session && npm run test:realtime && npm run test:election && npm run test:rls",
     "test:rls:live": "node supabase/rls.live.test.mjs",
     "check:db": "node scripts/check-db-access.mjs",
     "db:migrate": "node db/migrate.mjs",
-    "test:session": "tsx lib/server/session-token.test.mts"
+    "test:session": "tsx lib/server/session-token.test.mts",
+    "test:realtime": "NODE_OPTIONS=--conditions=react-server tsx lib/server/ws/realtime.test.mts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.5.2",
@@ -29,11 +30,13 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.8",
+    "@electric-sql/pglite-socket": "^0.2.11",
     "@types/node": "^22.7.5",
     "@types/pg": "^8.23.1",
     "@types/qrcode": "^1.5.5",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
+    "@types/ws": "^8.18.1",
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.14",
