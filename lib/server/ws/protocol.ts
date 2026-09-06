@@ -40,10 +40,18 @@ const EVENT_TYPE_PATTERN = /^[a-z][a-z0-9]*(:[a-z0-9-]+)*$/;
 
 // --- client → server --------------------------------------------------------
 
+/**
+ * `rid` correlates a request with its answer.
+ *
+ * Without it a client waiting for the result of its own patch will accept the
+ * *broadcast* that another member's patch produced, and conclude its own write
+ * succeeded when it actually conflicted. Room state is broadcast to everyone, so
+ * "the next state frame" is not an answer to anything in particular.
+ */
 export type ClientMessage =
-  | { t: "subscribe"; code: string; playerId: string }
+  | { t: "subscribe"; code: string; playerId: string; rid?: string }
   | { t: "unsubscribe"; code: string }
-  | { t: "patch"; code: string; playerId: string; version: number; state: Record<string, unknown> }
+  | { t: "patch"; code: string; playerId: string; version: number; state: Record<string, unknown>; rid?: string }
   | { t: "event"; code: string; playerId: string; eventType: string; payload: unknown }
   | {
       t: "presence";
@@ -59,17 +67,22 @@ export type ClientMessage =
 
 export type ServerMessage =
   | { t: "hello"; sessionId: string }
-  | { t: "state"; code: string; version: number; state: Record<string, unknown> }
+  | { t: "state"; code: string; version: number; state: Record<string, unknown>; rid?: string }
   | { t: "event"; code: string; eventType: string; payload: unknown; from: string; id: string }
-  | { t: "conflict"; code: string; version: number; state: Record<string, unknown> }
-  | { t: "denied"; code?: string; reason: string }
-  | { t: "error"; reason: string }
+  | { t: "ack"; code: string; version: number; rid?: string }
+  | { t: "conflict"; code: string; version: number; state: Record<string, unknown>; rid?: string }
+  | { t: "denied"; code?: string; reason: string; rid?: string }
+  | { t: "error"; reason: string; rid?: string }
   | { t: "closing"; reason: string }
   | { t: "pong" };
 
 export type ParseResult =
   | { ok: true; message: ClientMessage }
   | { ok: false; reason: string; fatal?: boolean };
+
+const RID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+const readRid = (raw: unknown) =>
+  typeof raw === "string" && RID_PATTERN.test(raw) ? raw : undefined;
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
@@ -166,7 +179,7 @@ export function parseClientMessage(raw: string | Buffer): ParseResult {
       const playerId = readPlayerId(parsed.playerId);
       if (!code) return { ok: false, reason: "malformed room code" };
       if (!playerId) return { ok: false, reason: "malformed player id" };
-      return { ok: true, message: { t: "subscribe", code, playerId } };
+      return { ok: true, message: { t: "subscribe", code, playerId, rid: readRid(parsed.rid) } };
     }
 
     case "unsubscribe": {
@@ -193,7 +206,14 @@ export function parseClientMessage(raw: string | Buffer): ParseResult {
 
       return {
         ok: true,
-        message: { t: "patch", code, playerId, version: parsed.version, state: parsed.state },
+        message: {
+          t: "patch",
+          code,
+          playerId,
+          version: parsed.version,
+          state: parsed.state,
+          rid: readRid(parsed.rid),
+        },
       };
     }
 

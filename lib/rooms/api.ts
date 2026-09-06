@@ -72,7 +72,7 @@ export class RoomSession {
     identity: PlayerIdentity;
     asHost: boolean;
   }): Promise<RoomSession> {
-    const transport = createTransport(options.code);
+    const transport = createTransport(options.code, { playerId: options.identity.id });
     const session = new RoomSession(transport, options.identity);
 
     transport.onState((next) => {
@@ -139,6 +139,12 @@ export class RoomSession {
   }
 
   setReady(ready: boolean) {
+    // Readiness is presence, not game state. A transport that carries presence
+    // out-of-band takes it there; the others write it into the document exactly
+    // as they always have.
+    if (this.transport.presence) {
+      return this.transport.presence({ ready, name: this.identity.name, emoji: this.identity.emoji });
+    }
     return this.updateState((current) => ({
       players: {
         [this.identity.id]: {
@@ -192,7 +198,9 @@ export class RoomSession {
       document.removeEventListener("visibilitychange", this.onVisible);
       window.removeEventListener("focus", this.onVisible);
     }
-    if (options.departing) {
+    // A presence-carrying transport tells the server on disconnect, which marks
+    // the seat offline at once — so there is nothing to write here.
+    if (options.departing && !this.transport.presence) {
       try {
         // `patchState` merges the player map, so departure is signalled by
         // zeroing our heartbeat; the presence timeout removes us everywhere.
@@ -245,7 +253,26 @@ export class RoomSession {
 
   private startHeartbeat() {
     if (typeof window === "undefined") return;
-    const beat = () =>
+
+    // The out-of-band path: one small row, and the room document is left alone.
+    // Host election still runs on the state the server sends back, so nothing
+    // about the rule changes — only what a beat costs.
+    const beatOutOfBand = () =>
+      void this.transport
+        .presence!({ name: this.identity.name, emoji: this.identity.emoji })
+        .then(() => {
+          const state = this.state;
+          if (state && electHost(state) === this.identity.id) {
+            return this.claimHostIfElected();
+          }
+        })
+        .catch(() => {
+          /* a dropped beat is recovered by the next one */
+        });
+
+    const beat = this.transport.presence
+      ? beatOutOfBand
+      : () =>
       void this.updateState((current) => {
         const me = current.players[this.identity.id];
         if (!me) {
@@ -270,6 +297,8 @@ export class RoomSession {
         }
       });
     this.heartbeat = setInterval(beat, HEARTBEAT_INTERVAL_MS);
+    // Beat once immediately so a fresh seat is visible before the first interval.
+    beat();
     // Background tabs get throttled, so beat the moment we come back.
     this.onVisible = () => {
       if (document.visibilityState === "visible") beat();
@@ -386,12 +415,31 @@ export function broadcastEvent(session: RoomSession, type: string, payload: unkn
   return session.broadcast(type, payload);
 }
 
-export async function roomExists(code: string) {
-  const transport = createTransport(code.toUpperCase());
-  await transport.connect();
-  const state = await transport.readState();
-  await transport.disconnect();
-  return state;
+/**
+ * Does this code lead anywhere.
+ *
+ * The hosted backends do not answer that question for strangers — a room is
+ * readable only by its members — so the honest check is to attempt the join the
+ * caller is about to make anyway. It is idempotent, and a code that does not
+ * resolve returns null exactly as before.
+ */
+export async function roomExists(code: string, identity = getIdentity()) {
+  const transport = createTransport(code.toUpperCase(), { playerId: identity.id });
+  try {
+    await transport.connect();
+    const state = await transport.readState();
+    if (state) return state;
+    // The local transport answers from storage; the hosted ones need the join.
+    if (transport.kind === "local") return null;
+    return await transport.ensureRoom({
+      ...emptyState(code.toUpperCase(), "", identity),
+      hostId: "",
+    });
+  } catch {
+    return null;
+  } finally {
+    await transport.disconnect();
+  }
 }
 
 // --- Derived helpers ---------------------------------------------------------

@@ -54,6 +54,11 @@ const subscribers = new Map<string, Set<Connection>>();
 const seats = new Map<string, Connection>();
 
 let wss: WebSocketServer | null = null;
+/** Kept so shutdown can detach it. Without this, re-attaching to the same HTTP
+ *  server leaves the old listener in place and *both* answer the next upgrade —
+ *  two handshakes on one socket, which the client sees as a corrupt frame. */
+let upgradeListener: ((req: IncomingMessage, socket: Duplex, head: Buffer) => void) | null = null;
+let attachedTo: HttpServer | null = null;
 let heartbeat: ReturnType<typeof setInterval> | null = null;
 let pruner: ReturnType<typeof setInterval> | null = null;
 let shuttingDown = false;
@@ -94,9 +99,15 @@ async function composeState(
   return { state: { ...room.state, players }, version: room.version };
 }
 
-async function pushState(conn: Connection, code: string) {
+async function pushState(conn: Connection, code: string, rid?: string) {
   const { state, version } = await composeState(conn.ctx, code);
-  send(conn.socket, { t: "state", code, version, state: state as unknown as Record<string, unknown> });
+  send(conn.socket, {
+    t: "state",
+    code,
+    version,
+    state: state as unknown as Record<string, unknown>,
+    rid,
+  });
 }
 
 /** Re-sends the room to everyone in it. Used after any accepted change. */
@@ -118,7 +129,7 @@ async function pushStateToRoom(code: string) {
 
 // --- message handling -------------------------------------------------------
 
-async function onSubscribe(conn: Connection, code: string, playerId: string) {
+async function onSubscribe(conn: Connection, code: string, playerId: string, rid?: string) {
   // Authorization happens here, before a single byte of room state is sent.
   // `readRoom` throws unless this session holds a seat; `assertRoomSeatByCode`
   // inside `touchPresence` throws unless it holds *this* seat.
@@ -126,7 +137,7 @@ async function onSubscribe(conn: Connection, code: string, playerId: string) {
     await touchPresence(conn.ctx, { code, playerId });
   } catch (error) {
     const reason = error instanceof AuthzError ? error.message : "Not allowed";
-    send(conn.socket, { t: "denied", code, reason });
+    send(conn.socket, { t: "denied", code, reason, rid });
     return;
   }
 
@@ -150,7 +161,7 @@ async function onSubscribe(conn: Connection, code: string, playerId: string) {
 
   // Late join and reconnect are the same path: whoever subscribes gets the
   // current document immediately, then every subsequent change.
-  await pushState(conn, code);
+  await pushState(conn, code, rid);
   // And everyone already here learns the roster changed.
   await pushStateToRoom(code);
 }
@@ -161,10 +172,11 @@ async function onPatch(
   playerId: string,
   version: number,
   state: Record<string, unknown>,
+  rid?: string,
 ) {
   const membership = conn.rooms.get(code);
   if (!membership || membership.playerId !== playerId) {
-    send(conn.socket, { t: "denied", code, reason: "Subscribe to that room first" });
+    send(conn.socket, { t: "denied", code, reason: "Subscribe to that room first", rid });
     return;
   }
 
@@ -188,10 +200,16 @@ async function onPatch(
       code,
       version: outcome.version,
       state: { ...outcome.state, players } as unknown as Record<string, unknown>,
+      rid,
     });
     return;
   }
 
+  // The writer gets a direct acknowledgement carrying its own `rid`; everyone,
+  // the writer included, gets the new document as a broadcast. Keeping those
+  // separate is what stops a client mistaking somebody else's broadcast for the
+  // answer to its own write.
+  send(conn.socket, { t: "ack", code, version: outcome.version, rid });
   await pushStateToRoom(code);
 }
 
@@ -287,13 +305,20 @@ async function handleMessage(conn: Connection, raw: Buffer) {
         send(conn.socket, { t: "pong" });
         break;
       case "subscribe":
-        await onSubscribe(conn, message.code, message.playerId);
+        await onSubscribe(conn, message.code, message.playerId, message.rid);
         break;
       case "unsubscribe":
         detach(conn, message.code);
         break;
       case "patch":
-        await onPatch(conn, message.code, message.playerId, message.version, message.state);
+        await onPatch(
+          conn,
+          message.code,
+          message.playerId,
+          message.version,
+          message.state,
+          message.rid,
+        );
         break;
       case "event":
         await onEvent(conn, message.code, message.playerId, message.eventType, message.payload);
@@ -308,7 +333,8 @@ async function handleMessage(conn: Connection, raw: Buffer) {
     }
   } catch (error) {
     if (error instanceof AuthzError) {
-      send(conn.socket, { t: "denied", reason: error.message });
+      const rid = "rid" in message ? (message as { rid?: string }).rid : undefined;
+      send(conn.socket, { t: "denied", reason: error.message, rid });
       return;
     }
     // Never let an internal message reach a client; it can name a table, a
@@ -329,8 +355,9 @@ export function attachRealtime(server: HttpServer, path = "/ws") {
   if (wss) return wss;
 
   wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
+  attachedTo = server;
 
-  server.on("upgrade", (request: IncomingMessage, socket: Duplex, head: Buffer) => {
+  upgradeListener = (request: IncomingMessage, socket: Duplex, head: Buffer) => {
     let url: URL;
     try {
       url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
@@ -382,7 +409,9 @@ export function attachRealtime(server: HttpServer, path = "/ws") {
         socket.write("HTTP/1.1 500 Internal Server Error\r\n\r\n");
         socket.destroy();
       });
-  });
+  };
+
+  server.on("upgrade", upgradeListener);
 
   // Drops sockets that have stopped answering — a half-open TCP connection
   // looks alive to the OS and would otherwise hold a seat indefinitely.
@@ -423,6 +452,10 @@ export async function shutdownRealtime(reason = "Server restarting") {
   for (const client of server.clients) (client as WebSocket).close(1001, "going away");
 
   await new Promise<void>((resolve) => server.close(() => resolve()));
+
+  if (attachedTo && upgradeListener) attachedTo.off("upgrade", upgradeListener);
+  upgradeListener = null;
+  attachedTo = null;
   wss = null;
   subscribers.clear();
   seats.clear();

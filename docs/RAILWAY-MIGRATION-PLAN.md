@@ -688,7 +688,7 @@ Approved with decisions A–F as proposed. Updated as each stage lands.
 | 2 | Postgres data layer + migrations + authorization gates | ☑ done |
 | 3 | Anonymous session layer | ☑ done |
 | 4 | WebSocket / realtime server | ☑ done |
-| 5 | `RailwayRoomTransport` behind `RoomTransport` | ☐ |
+| 5 | `RailwayRoomTransport` behind `RoomTransport` | ☑ done |
 | 6 | R2 media storage + signed URLs | ☐ |
 | 7 | Photobooth thumbnail flow (Decision F) | ☐ |
 | 8 | Remove decorative email/Google sign-in (Decision D) | ☐ |

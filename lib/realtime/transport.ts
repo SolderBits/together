@@ -1,12 +1,26 @@
 import type { RoomEvent, RoomState, RoomStatePatch } from "@/lib/rooms/types";
 
 /**
+ * A presence beat: who is here, and how they are.
+ *
+ * Separate from `patchState` because presence is high-frequency and tiny while
+ * the room document is low-frequency and can be large. Folding one into the
+ * other is what made a heartbeat re-serialise an entire Draw Together round
+ * twenty times a minute.
+ */
+export interface PresenceUpdate {
+  name?: string;
+  emoji?: string;
+  ready?: boolean;
+}
+
+/**
  * The contract every realtime backend implements. Experiences only ever talk to
  * this interface (through `useRoom`), so swapping Supabase for anything else is
  * a one-file change.
  */
 export interface RoomTransport {
-  readonly kind: "local" | "supabase";
+  readonly kind: "local" | "supabase" | "railway";
   readonly code: string;
 
   /** Attach to the room, emitting the current state as soon as it is known. */
@@ -22,6 +36,14 @@ export interface RoomTransport {
 
   onState(handler: (state: RoomState) => void): () => void;
   onEvent(handler: (event: RoomEvent) => void): () => void;
+
+  /**
+   * Optional. A transport that can carry presence out-of-band implements this;
+   * one that cannot simply does not, and `RoomSession` falls back to writing
+   * presence into the room document as it always has. That keeps the local and
+   * Supabase transports working untouched.
+   */
+  presence?(update: PresenceUpdate): Promise<void>;
 }
 
 /** Shallow-merge a patch into a state document, merging `data` one level deep. */

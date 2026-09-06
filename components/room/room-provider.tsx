@@ -36,7 +36,7 @@ interface RoomContextValue {
   isHost: boolean;
   isSolo: boolean;
   bothReady: boolean;
-  backend: "local" | "supabase" | null;
+  backend: "local" | "supabase" | "railway" | null;
   update: (patch: RoomStatePatch | ((current: RoomState) => RoomStatePatch)) => Promise<void>;
   setReady: (ready: boolean) => Promise<void>;
   start: () => Promise<void>;
