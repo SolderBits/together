@@ -685,7 +685,7 @@ Approved with decisions A–F as proposed. Updated as each stage lands.
 | # | Stage | Status |
 |---|---|---|
 | 1 | Create `railway-migration` branch | ☑ done |
-| 2 | Postgres data layer + migrations + authorization gates | ☐ |
+| 2 | Postgres data layer + migrations + authorization gates | ☑ done |
 | 3 | Anonymous session layer | ☐ |
 | 4 | WebSocket / realtime server | ☐ |
 | 5 | `RailwayRoomTransport` behind `RoomTransport` | ☐ |
