@@ -21,6 +21,8 @@ import { addScrapbookItem, saveStrip } from "@/lib/store";
 import { useRecordCompletion } from "@/lib/store/use-completion";
 import { capturePointer, clamp, formatDate, uid } from "@/lib/utils";
 import { describeOutcome, exportImage } from "@/lib/media/export-image";
+import { fetchOriginal, mediaBackendAvailable, uploadOriginal } from "@/lib/media/photo-media";
+import { isWithinThumbnailBudget, makeThumbnail } from "@/lib/media/thumbnail";
 import { cn } from "@/lib/utils";
 
 type Phase = "setup" | "shooting" | "editing";
@@ -32,6 +34,15 @@ interface BoothData {
   captureAt: number | null;
   /** Who has captured which round — the pixels travel over broadcast, not state. */
   taken: Record<string, string[]>;
+  /**
+   * `previews[round][playerId]` — a media id and a ≤2 KB placeholder.
+   *
+   * This is the *only* photo-shaped thing in the replicated document. The
+   * originals are 391 KB apiece and live in object storage; the placeholder
+   * exists so a partner sees something between the shutter and the upload
+   * landing, and the id is how they fetch the real one.
+   */
+  previews: Record<string, Record<string, { mediaId: string; thumbnail: string }>>;
   frameId: string;
   filterId: string;
   caption: string;
@@ -45,6 +56,7 @@ const DEFAULTS: BoothData = {
   round: 0,
   captureAt: null,
   taken: {},
+  previews: {},
   frameId: "classic",
   filterId: "none",
   caption: "",
@@ -89,6 +101,17 @@ export function Photobooth() {
   const [exportNote, setExportNote] = useState<string | null>(null);
   const [draggingSticker, setDraggingSticker] = useState<string | null>(null);
   const capturedRounds = useRef<Set<number>>(new Set());
+  /**
+   * mediaId → the full-resolution original, in memory only.
+   *
+   * Never serialised anywhere: not into the room document, not across the
+   * socket, not into browser storage. It is what the 2400px export composes
+   * from, and it is repopulated after a refresh by fetching from storage.
+   */
+  const originalsRef = useRef<Map<string, string>>(new Map());
+  const fetching = useRef<Set<string>>(new Set());
+  /** mediaId → which cell of the strip it belongs to. */
+  const mediaOwners = useRef<Map<string, { round: number; playerId: string }>>(new Map());
   const shotsRef = useRef(shots);
   shotsRef.current = shots;
   const stripBoxRef = useRef<HTMLDivElement>(null);
@@ -117,11 +140,21 @@ export function Photobooth() {
     setPartnerFrame(payload.frame);
   });
 
-  // Recover our own strip after a refresh, and ask whoever is here for theirs.
+  /**
+   * Coming back to a room in progress.
+   *
+   * With a hosted backend the room document already names every photo, so the
+   * effect above rebuilds the strip from `previews` and fetches the originals;
+   * nothing needs to be mirrored anywhere. Without one there is no storage to
+   * fetch from, so the browser copy is still how a refresh survives — and the
+   * peers are asked to re-send.
+   */
   useEffect(() => {
     if (!state?.code) return;
-    const stored = readStoredShots(state.code);
-    if (Object.keys(stored).length) setShots(stored);
+    if (!mediaBackendAvailable()) {
+      const stored = readStoredShots(state.code);
+      if (Object.keys(stored).length) setShots(stored);
+    }
     void broadcast("booth:request-shots", { playerId: identity.id });
     // Only on first connect to a given room.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -129,6 +162,9 @@ export function Photobooth() {
 
   useEffect(() => {
     if (!state?.code) return;
+    // Originals are 391 KB apiece. With storage behind them there is no reason
+    // to keep a second copy in the browser, and good reason not to.
+    if (mediaBackendAvailable()) return;
     try {
       window.sessionStorage.setItem(shotsKey(state.code), JSON.stringify(shots));
     } catch {
@@ -136,26 +172,148 @@ export function Photobooth() {
     }
   }, [shots, state?.code]);
 
-  // Re-send our frames so a partner who joined late (or refreshed) catches up.
+  /**
+   * Someone arrived and wants what they missed.
+   *
+   * With storage, the announcement is enough: they resolve the ids themselves.
+   * Without it, we send the pixels, because we are the only copy.
+   */
   useRoomEvent<{ playerId: string }>("booth:request-shots", (payload) => {
     if (payload.playerId === identity.id) return;
-    Object.entries(shotsRef.current).forEach(([round, byPlayer]) => {
+
+    Object.entries(data.previews ?? {}).forEach(([round, byPlayer]) => {
       const mine = byPlayer[identity.id];
-      if (mine) {
-        void broadcast("booth:shot", { round: Number(round), playerId: identity.id, dataUrl: mine });
+      if (!mine) return;
+      void broadcast("booth:shot", {
+        round: Number(round),
+        playerId: identity.id,
+        mediaId: mine.mediaId,
+        thumbnail: mine.thumbnail,
+      });
+      if (!mediaBackendAvailable()) {
+        const original = originalsRef.current.get(mine.mediaId);
+        if (original) void broadcast("booth:original", { mediaId: mine.mediaId, dataUrl: original });
       }
     });
   });
 
-  useRoomEvent<{ round: number; playerId: string; dataUrl: string }>("booth:shot", (payload) => {
+  /**
+   * Replaces a placeholder with the real photo, once.
+   *
+   * Idempotent and de-duplicated: a reconnect replays the announcements, and
+   * fetching the same original three times would cost three signed URLs and
+   * three downloads for no gain.
+   */
+  const hydrate = useCallback(
+    async (mediaId: string) => {
+      if (!mediaId || originalsRef.current.has(mediaId) || fetching.current.has(mediaId)) return;
+      if (!mediaBackendAvailable() || mediaId.startsWith("local_")) return;
+
+      fetching.current.add(mediaId);
+      try {
+        const url = await fetchOriginal(mediaId);
+        if (!url) return;
+        originalsRef.current.set(mediaId, url);
+        const owner = mediaOwners.current.get(mediaId);
+        if (!owner) return;
+        setShots((prev) => ({
+          ...prev,
+          [owner.round]: { ...(prev[owner.round] ?? {}), [owner.playerId]: url },
+        }));
+      } finally {
+        fetching.current.delete(mediaId);
+      }
+    },
+    [],
+  );
+
+  /**
+   * After a refresh, the room document still names every photo taken so far.
+   * Placeholders go up immediately and the originals are fetched behind them —
+   * which is also how a late joiner catches up, by the same path.
+   */
+  useEffect(() => {
+    const previews = data.previews ?? {};
+    for (const [round, byPlayer] of Object.entries(previews)) {
+      for (const [playerId, ref] of Object.entries(byPlayer)) {
+        mediaOwners.current.set(ref.mediaId, { round: Number(round), playerId });
+
+        setShots((prev) => {
+          if (prev[Number(round)]?.[playerId]) return prev;
+          if (!isWithinThumbnailBudget(ref.thumbnail)) return prev;
+          return {
+            ...prev,
+            [Number(round)]: { ...(prev[Number(round)] ?? {}), [playerId]: ref.thumbnail },
+          };
+        });
+
+        void hydrate(ref.mediaId);
+      }
+    }
+  }, [data.previews, hydrate]);
+
+  /**
+   * A partner's capture: a reference and a placeholder.
+   *
+   * The placeholder goes on screen at once so the strip fills in as the round
+   * happens; the original is fetched behind it and swapped in when it arrives.
+   * If it never arrives, the placeholder stays — a blurry frame is better than
+   * an empty one.
+   */
+  useRoomEvent<{ round: number; playerId: string; mediaId: string; thumbnail: string | null }>(
+    "booth:shot",
+    (payload) => {
+      if (payload.thumbnail && isWithinThumbnailBudget(payload.thumbnail)) {
+        setShots((prev) => {
+          const existing = prev[payload.round]?.[payload.playerId];
+          // Never replace a full original with a placeholder — messages can
+          // arrive out of order, and a reconnect replays them.
+          if (existing && !existing.startsWith("data:image/jpeg;base64,/9j/4AAQ")) {
+            if (existing.length > (payload.thumbnail?.length ?? 0)) return prev;
+          }
+          return {
+            ...prev,
+            [payload.round]: {
+              ...(prev[payload.round] ?? {}),
+              [payload.playerId]: payload.thumbnail!,
+            },
+          };
+        });
+      }
+
+      mediaOwners.current.set(payload.mediaId, {
+        round: payload.round,
+        playerId: payload.playerId,
+      });
+      void hydrate(payload.mediaId);
+    },
+  );
+
+  /** The originals a peer sent us directly, when there is no storage to fetch from. */
+  useRoomEvent<{ mediaId: string; dataUrl: string }>("booth:original", (payload) => {
+    if (!payload?.mediaId || !payload.dataUrl) return;
+    originalsRef.current.set(payload.mediaId, payload.dataUrl);
+    const owner = mediaOwners.current.get(payload.mediaId);
+    if (!owner) return;
     setShots((prev) => ({
       ...prev,
-      [payload.round]: { ...(prev[payload.round] ?? {}), [payload.playerId]: payload.dataUrl },
+      [owner.round]: { ...(prev[owner.round] ?? {}), [owner.playerId]: payload.dataUrl },
     }));
   });
 
   // --- capture -------------------------------------------------------------
 
+  /**
+   * One shutter, two artefacts.
+   *
+   * The original stays in this tab's memory and goes to object storage. The
+   * thumbnail — under 2 KB — is what crosses the socket and enters the room
+   * document, so the other person sees the frame appear immediately and the
+   * sharp version replaces it a moment later.
+   *
+   * Nothing here awaits the upload before showing the photo: a slow or failed
+   * upload costs the export its full resolution, never the session.
+   */
   const captureNow = useCallback(
     (round: number) => {
       if (capturedRounds.current.has(round)) return;
@@ -164,11 +322,15 @@ export function Photobooth() {
       setFlash(true);
       setTimeout(() => setFlash(false), 520);
       if (!shot) return;
+
+      // On screen at full resolution straight away, for us.
       setShots((prev) => ({
         ...prev,
         [round]: { ...(prev[round] ?? {}), [identity.id]: shot },
       }));
-      void broadcast("booth:shot", { round, playerId: identity.id, dataUrl: shot });
+
+      // Mark the round taken now, so the sequence advances even if the upload
+      // is slow.
       void setData((c) => ({
         ...c,
         taken: {
@@ -176,8 +338,47 @@ export function Photobooth() {
           [String(round)]: Array.from(new Set([...(c.taken[String(round)] ?? []), identity.id])),
         },
       }));
+
+      void (async () => {
+        const thumbnail = await makeThumbnail(shot);
+        const { mediaId, stored } = await uploadOriginal({
+          code: state?.code ?? "",
+          playerId: identity.id,
+          kind: "booth",
+          dataUrl: shot,
+        });
+        originalsRef.current.set(mediaId, shot);
+
+        // A reference and a placeholder — never the photo itself.
+        if (thumbnail && isWithinThumbnailBudget(thumbnail.dataUrl)) {
+          void setData((c) => ({
+            ...c,
+            previews: {
+              ...c.previews,
+              [String(round)]: {
+                ...(c.previews?.[String(round)] ?? {}),
+                [identity.id]: { mediaId, thumbnail: thumbnail.dataUrl },
+              },
+            },
+          }));
+        }
+
+        void broadcast("booth:shot", {
+          round,
+          playerId: identity.id,
+          mediaId,
+          thumbnail: thumbnail?.dataUrl ?? null,
+        });
+
+        // With no hosted backend there is nowhere to fetch the original from,
+        // so the two tabs share it directly as they always have. Same machine,
+        // no server, no cost — and it keeps local development working.
+        if (!stored) {
+          void broadcast("booth:original", { mediaId, dataUrl: shot });
+        }
+      })();
     },
-    [camera, identity.id, broadcast, setData],
+    [camera, identity.id, broadcast, setData, state?.code],
   );
 
   useEffect(() => {
@@ -293,11 +494,42 @@ export function Photobooth() {
    * The message afterwards says what actually happened — on iOS that is usually
    * the share sheet or a press-and-hold, not a download.
    */
+  /**
+   * Every original this strip needs, fetched and in memory.
+   *
+   * The export is 2400 wide and each photo occupies about 1068 of that, so a
+   * 48-pixel placeholder would be visibly wrong. Waiting for the real ones is
+   * the difference between a strip worth keeping and a blurry one.
+   */
+  async function withOriginals(spec: StripSpec): Promise<StripSpec> {
+    const pending: Promise<void>[] = [];
+    for (const ref of Object.values(data.previews ?? {}).flatMap((r) => Object.values(r))) {
+      if (!originalsRef.current.has(ref.mediaId)) pending.push(hydrate(ref.mediaId));
+    }
+    if (pending.length) await Promise.all(pending);
+
+    // Rebuild the rows from whatever is now resolved, preferring the original.
+    const rows: string[][] = [];
+    for (let i = 0; i < data.totalRounds; i++) {
+      const previews = data.previews?.[String(i)] ?? {};
+      const order = [identity.id, ...roster.map((p) => p.id).filter((id) => id !== identity.id)];
+      const cell = order
+        .map((id) => {
+          const ref = previews[id];
+          const original = ref ? originalsRef.current.get(ref.mediaId) : undefined;
+          return original ?? shots[i]?.[id];
+        })
+        .filter(Boolean) as string[];
+      if (cell.length) rows.push(cell);
+    }
+    return rows.length ? { ...spec, rounds: rows } : spec;
+  }
+
   async function download() {
     setDownloading(true);
     setExportNote(null);
     try {
-      const url = await composeStrip(finalSpec, 2400);
+      const url = await composeStrip(await withOriginals(finalSpec), 2400);
       const outcome = await exportImage(url, `together-photostrip-${Date.now()}.png`, {
         title: "Our photo strip",
       });
@@ -310,7 +542,7 @@ export function Photobooth() {
   }
 
   async function keepIt(destination: "scrapbook" | "strips") {
-    const url = await composeStrip(finalSpec, 1400);
+    const url = await composeStrip(await withOriginals(finalSpec), 1400);
     saveStrip({
       dataUrl: url,
       frame: data.frameId,
