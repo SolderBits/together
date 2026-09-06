@@ -14,6 +14,8 @@ import {
   readRoom,
   touchPresence,
 } from "@/lib/server/db/rooms";
+import { collectAbandonedMedia } from "@/lib/server/db/media";
+import { objectStore } from "@/lib/server/storage";
 import {
   MAX_MESSAGE_BYTES,
   RateLimiter,
@@ -424,7 +426,7 @@ export function attachRealtime(server: HttpServer, path = "/ws") {
   }, HEARTBEAT_MS);
 
   pruner = setInterval(() => {
-    void pruneExpired().catch((error) => console.error("[ws] prune failed", error));
+    void sweep().catch((error) => console.error("[ws] prune failed", error));
   }, PRUNE_INTERVAL_MS);
 
   return wss;
@@ -460,6 +462,23 @@ export async function shutdownRealtime(reason = "Server restarting") {
   subscribers.clear();
   seats.clear();
   shuttingDown = false;
+}
+
+/**
+ * Housekeeping: expired rooms, expired sessions, and the objects they leave.
+ *
+ * The rows and the bytes are dropped together. Deleting a media row on its own
+ * would leave an object nobody can reach and everybody is paying to store.
+ */
+async function sweep() {
+  const { rooms, sessions } = await pruneExpired();
+  const strandedKeys = await collectAbandonedMedia();
+  if (strandedKeys.length) await objectStore().remove(strandedKeys);
+  if (rooms || sessions || strandedKeys.length) {
+    console.log(
+      `[sweep] ${rooms} room(s), ${sessions} session(s), ${strandedKeys.length} object(s)`,
+    );
+  }
 }
 
 /** Counters worth having when something looks wrong. */

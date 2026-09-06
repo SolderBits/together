@@ -10,15 +10,18 @@
     "typecheck": "tsc --noEmit",
     "test:rls": "node supabase/rls.test.mjs",
     "test:election": "tsx lib/rooms/election.test.ts",
-    "test": "npm run check:db && npm run test:session && npm run test:realtime && npm run test:transport && npm run test:election && npm run test:rls",
+    "test": "npm run check:db && npm run test:session && npm run test:realtime && npm run test:transport && npm run test:media && npm run test:election && npm run test:rls",
     "test:rls:live": "node supabase/rls.live.test.mjs",
     "check:db": "node scripts/check-db-access.mjs",
     "db:migrate": "node db/migrate.mjs",
     "test:session": "tsx lib/server/session-token.test.mts",
     "test:realtime": "NODE_OPTIONS=--conditions=react-server tsx lib/server/ws/realtime.test.mts",
-    "test:transport": "NODE_OPTIONS=--conditions=react-server tsx lib/realtime/railway-transport.test.mts"
+    "test:transport": "NODE_OPTIONS=--conditions=react-server tsx lib/realtime/railway-transport.test.mts",
+    "test:media": "NODE_OPTIONS=--conditions=react-server tsx lib/server/storage/media.test.mts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1127.0",
+    "@aws-sdk/s3-request-presigner": "^3.1127.0",
     "@supabase/ssr": "^0.5.2",
     "@supabase/supabase-js": "^2.45.4",
     "jose": "^6.2.12",

@@ -46,6 +46,20 @@ export function pool(): pg.Pool {
 }
 
 /**
+ * Closes the pool.
+ *
+ * Called on SIGTERM so in-flight queries finish before the process goes, and by
+ * tests so the driver is not still holding a socket when the database it was
+ * talking to is torn down.
+ */
+export async function closePool(): Promise<void> {
+  const existing = globalThis.__togetherPool;
+  if (!existing) return;
+  globalThis.__togetherPool = undefined;
+  await existing.end().catch(() => {});
+}
+
+/**
  * A parameterised query. There is no variant that takes interpolated SQL, and
  * `text` is only ever a literal written in this directory — user input reaches
  * Postgres exclusively through `params`.
