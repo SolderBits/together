@@ -43,8 +43,8 @@ Everything below is optional. Each one upgrades a capability that already works.
 | Feature | With no config | Once configured |
 | --- | --- | --- |
 | Rooms & realtime | `BroadcastChannel` + `localStorage` — two tabs on one machine | Supabase Realtime — two devices anywhere |
-| Accounts | Guest identity per browser | Email link + Google sign-in |
-| Saved memories | This browser only | Synced to the account |
+| Accounts | Guest identity per browser | Guest identity per browser — there is no account to make |
+| Saved memories | This browser only | This browser only |
 | Debate / Couples Court judging | Deterministic offline judge | Anthropic model, scored server-side |
 | Letters | Unseal in-app on the delivery date | Could be emailed on the date |
 
