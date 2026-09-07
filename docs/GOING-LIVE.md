@@ -39,6 +39,22 @@ document a checklist rather than a hope.
 
 ---
 
+## 0. The one thing that must be done by hand
+
+```bash
+railway login
+```
+
+Everything else below can be driven from the CLI, but this cannot: it opens a
+browser and authenticates *you*. Nothing automated should ever hold your
+Railway session.
+
+The Cloudflare side (step 7) is the same — creating the account, the bucket and
+the API token is yours to do, and the four values go straight into Railway
+without passing through anything else.
+
+---
+
 ## 1. Create the Railway project
 
 1. Sign in at [railway.com](https://railway.com) and create a project.
@@ -300,6 +316,68 @@ to the old value and `SESSION_SECRET` to a new one, deploy, then remove the
 previous one on the next deploy — nobody is signed out. R2 keys: create a new
 token, update all four variables, deploy, then delete the old token. Database:
 `alter role together_app with password '...'`, update `DATABASE_URL`, deploy.
+
+---
+
+## The CLI path
+
+The dashboard steps above have an equivalent sequence, which is what a repeat
+setup should use. After `railway login`:
+
+```bash
+railway init                          # create the project, name it
+railway add --database postgres       # provision Postgres
+railway link                          # link this directory to the service
+```
+
+Set variables without their values ever appearing in a terminal history or a
+log — the shell substitutes, the CLI transmits, nothing prints:
+
+```bash
+railway variables --set "SESSION_SECRET=$(openssl rand -hex 32)"
+railway variables --set 'MIGRATE_DATABASE_URL=${{Postgres.DATABASE_URL}}'
+railway variables --set 'DATABASE_URL=${{Postgres.DATABASE_URL}}'
+```
+
+`DATABASE_URL` is replaced with the `together_app` connection in step 5; until
+then the app will refuse to start in production, which is the point.
+
+```bash
+railway domain                        # generate the public domain
+railway up                            # build and deploy from this directory
+railway logs --deployment             # watch the boot sequence
+railway connect Postgres              # psql, for db/role.sql
+```
+
+The R2 values are the exception. Paste them in the dashboard, or:
+
+```bash
+railway variables --set "R2_ACCOUNT_ID=..."       # your values, your terminal
+```
+
+---
+
+## Deploying future versions
+
+Railway redeploys on every push to the connected branch. So:
+
+```bash
+npm run predeploy    # types, 433 assertions, a real build, a production rehearsal
+git push
+```
+
+`predeploy` is what makes the push safe — it builds, installs with `--omit=dev`
+into a clean directory, boots the result, and drives it over HTTP and
+WebSocket. If it passes and the deploy still fails, the difference is the
+platform, and `railway logs --deployment` is where it will say so.
+
+Migrations run themselves on boot, under an advisory lock, recorded in a
+ledger, each in its own transaction. Take a backup first when a deploy carries
+one — **Postgres service → Backups → Create backup** — because they are
+forward-only by design.
+
+Anything `NEXT_PUBLIC_` is compiled into the browser bundle at build time. A
+change to one needs a redeploy, not a restart.
 
 ---
 
