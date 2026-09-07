@@ -693,14 +693,14 @@ Approved with decisions A–F as proposed. Updated as each stage lands.
 | 7 | Photobooth thumbnail flow (Decision F) | ☑ done |
 | 8 | Remove decorative email/Google sign-in (Decision D) | ☑ done |
 | 9 | Connect experiences to the new transport | ☑ done |
-| 10 | Integration + security test suite | ☐ |
-| 11 | Full local suite green | ☐ |
+| 10 | Production hardening + attack suite | ☑ done — [STAGE-10-HARDENING.md](STAGE-10-HARDENING.md) |
+| 11 | Deployment readiness + production rehearsal | ☑ done — [GOING-LIVE.md](GOING-LIVE.md) |
 | 12 | Deploy staging instance to Railway | ☐ |
 | 13 | Security tests against the deployed instance | ☐ |
 | 14 | Two devices, separate networks | ☐ |
 | 15 | Prepare production deployment | ☐ |
 | — | Remove Supabase (only after 14 passes) | ☐ |
 
-**Gates.** `npm test`, `npm run build` and `npx tsc --noEmit` stay green at every
-stage. Supabase is not touched before stage 14 passes. No claim of production
+**Gates.** `npm run verify` — types, all eight suites, then a real build scanned
+for leaked secrets — stays green at every stage. Supabase is not touched before stage 14 passes. No claim of production
 readiness before stage 14.

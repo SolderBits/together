@@ -21,6 +21,21 @@ export const dynamic = "force-dynamic";
  * whether a caller gets one of these is `/api/media`, which does check.
  */
 
+/**
+ * The type this object was stored as, from the extension the server chose.
+ *
+ * Not from the request, and not sniffed: the upload path already confirmed the
+ * bytes match an allowed image format, and the key it minted records which one.
+ * Anything unrecognised is served as bytes rather than guessed at.
+ */
+function contentTypeFor(key: string): string {
+  const extension = key.slice(key.lastIndexOf(".") + 1).toLowerCase();
+  return (
+    { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp" }[extension] ??
+    "application/octet-stream"
+  );
+}
+
 function readParams(request: Request) {
   const url = new URL(request.url);
   return {
@@ -73,7 +88,14 @@ export async function GET(request: Request) {
   return new NextResponse(Buffer.from(bytes), {
     status: 200,
     headers: {
-      "content-type": "image/jpeg",
+      "content-type": contentTypeFor(key),
+      // Whatever this file turns out to be, the browser must treat it as the
+      // type declared above. Without this a stored object that a sniffer reads
+      // as HTML would run as a same-origin page.
+      "x-content-type-options": "nosniff",
+      // And it is never a page: an image the browser refuses to render should
+      // download, not execute.
+      "content-disposition": "inline",
       "cache-control": "private, max-age=900",
     },
   });

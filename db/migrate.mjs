@@ -11,7 +11,7 @@
  * Every file is also written to be idempotent on its own (`if not exists`), so
  * a re-run is harmless even if the ledger is ever lost.
  */
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
@@ -57,6 +57,14 @@ export async function migrate(connectionString = process.env.DATABASE_URL, { qui
       const done = new Set(
         (await client.query("select name from schema_migrations")).rows.map((r) => r.name),
       );
+
+      if (!existsSync(MIGRATIONS)) {
+        throw new Error(
+          `No migrations directory at ${MIGRATIONS}. This runner finds its SQL ` +
+            "relative to its own location, so it must not be bundled — see the " +
+            "externals in scripts/build-server.mjs.",
+        );
+      }
 
       const files = readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql")).sort();
 

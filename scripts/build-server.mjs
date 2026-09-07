@@ -25,7 +25,25 @@ await build({
   sourcemap: true,
   // Anything with a native binding, a large runtime, or its own resolution
   // rules is left to Node to require at runtime.
-  external: ["next", "pg", "pg-native", "ws", "jose", "@aws-sdk/*"],
+  external: [
+    "next",
+    "pg",
+    "pg-native",
+    "ws",
+    "jose",
+    "@aws-sdk/*",
+    /*
+     * The migration runner must NOT be bundled. It locates db/migrations/*.sql
+     * relative to its own `import.meta.url`; inlined into dist/server.mjs that
+     * becomes dist/migrations, which does not exist, and the server exits on
+     * its first boot. Left external, `../db/migrate.mjs` resolves from dist/ to
+     * the real file, which then finds its own directory.
+     *
+     * scripts/check-production.mjs boots the built server against a real
+     * database, which is what keeps this honest.
+     */
+    "../db/migrate.mjs",
+  ],
   alias: {
     "@": root,
     // `server-only` is a marker that throws unless the bundler resolved it

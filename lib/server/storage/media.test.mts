@@ -21,17 +21,15 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { PGlite } from "@electric-sql/pglite";
 import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
-import { PGLiteSocketServer } from "@electric-sql/pglite-socket";
+import { startPgSocket } from "../testing/pg-socket.mts";
 import { migrate } from "../../../db/migrate.mjs";
 
 const storageDir = await mkdtemp(join(tmpdir(), "together-media-test-"));
 process.env.LOCAL_STORAGE_DIR = storageDir;
 
 const db = await PGlite.create({ extensions: { pgcrypto } });
-const PG_PORT = 56_100 + Math.floor(Math.random() * 200);
-const pgServer = new PGLiteSocketServer({ db, port: PG_PORT, host: "127.0.0.1" });
-await pgServer.start();
-process.env.DATABASE_URL = `postgres://postgres:postgres@127.0.0.1:${PG_PORT}/postgres`;
+const pgSocket = await startPgSocket(db);
+process.env.DATABASE_URL = pgSocket.url;
 process.env.PGPOOL_MAX = "1";
 await migrate(process.env.DATABASE_URL, { quiet: true });
 
@@ -414,7 +412,7 @@ check(
 
 const { closePool } = await import("../db/pool");
 await closePool();
-await pgServer.stop();
+await pgSocket.server.stop();
 await db.close();
 await rm(storageDir, { recursive: true, force: true });
 

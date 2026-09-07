@@ -15,6 +15,19 @@ import { SESSION_COOKIE, verifyToken } from "./session-token";
  * Both checks still run: the signature proves the token is ours and unaltered,
  * and the row proves the session behind it is still live.
  */
+/**
+ * The caller's identity, taken from the request itself.
+ *
+ * Route handlers used the `cookies()` store, which only exists inside Next's
+ * request scope — so they could not be called directly and their authorization
+ * could only be tested through a running server. Reading the header off the
+ * `Request` they were already handed makes each handler a plain function of its
+ * input, which is both simpler and testable by attacking it.
+ */
+export async function sessionFromRequest(request: Request): Promise<SessionContext | null> {
+  return sessionFromCookieHeader(request.headers.get("cookie") ?? undefined);
+}
+
 export async function sessionFromCookieHeader(
   header: string | undefined,
 ): Promise<SessionContext | null> {

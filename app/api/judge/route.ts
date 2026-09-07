@@ -1,9 +1,20 @@
 import { NextResponse } from "next/server";
 import { judgeOffline } from "@/lib/ai/offline-judge";
-import { MAX_BODY_BYTES, callerKey, rateLimit, validateJudgeRequest } from "@/lib/ai/guard";
+import {
+  MAX_BODY_BYTES,
+  callerKey,
+  claimAiCall,
+  rateLimit,
+  validateJudgeRequest,
+} from "@/lib/ai/guard";
 import type { JudgeRequest, Verdict } from "@/lib/ai/types";
+import { log } from "@/lib/server/log";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+/** A verdict is written for one round of one game. It is nobody else's. */
+const NO_STORE = { "cache-control": "no-store, max-age=0" } as const;
 
 const MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-5";
 const API_URL = "https://api.anthropic.com/v1/messages";
@@ -23,14 +34,14 @@ export async function POST(request: Request) {
   if (!limit.allowed) {
     return NextResponse.json(
       { error: "Too many verdicts too quickly. Give it a minute." },
-      { status: 429, headers: { "retry-after": String(limit.retryAfterSeconds) } },
+      { status: 429, headers: { "retry-after": String(limit.retryAfterSeconds), ...NO_STORE } },
     );
   }
 
   // Refuse oversized bodies before reading them into memory.
   const declared = Number(request.headers.get("content-length") ?? 0);
   if (declared > MAX_BODY_BYTES) {
-    return NextResponse.json({ error: "That request is too large." }, { status: 413 });
+    return NextResponse.json({ error: "That request is too large." }, { status: 413, headers: NO_STORE });
   }
 
   let raw: unknown;
@@ -38,33 +49,35 @@ export async function POST(request: Request) {
     const text = await request.text();
     // A missing or lying content-length is caught here.
     if (new TextEncoder().encode(text).length > MAX_BODY_BYTES) {
-      return NextResponse.json({ error: "That request is too large." }, { status: 413 });
+      return NextResponse.json({ error: "That request is too large." }, { status: 413, headers: NO_STORE });
     }
     raw = JSON.parse(text);
   } catch {
-    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
+    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400, headers: NO_STORE });
   }
 
   const parsed = validateJudgeRequest(raw);
   if (!parsed.ok) {
-    return NextResponse.json({ error: parsed.reason }, { status: 400 });
+    return NextResponse.json({ error: parsed.reason }, { status: 400, headers: NO_STORE });
   }
   const body = parsed.value;
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json(judgeOffline(body));
+  // No key, or the upstream budget for this minute is spent. Either way the
+  // offline judge answers and the game carries on.
+  if (!apiKey || !claimAiCall()) {
+    return NextResponse.json(judgeOffline(body), { headers: NO_STORE });
   }
 
   try {
     const verdict = await judgeWithAi(body, apiKey);
-    return NextResponse.json(verdict);
+    return NextResponse.json(verdict, { headers: NO_STORE });
   } catch (error) {
     // Never fail the game because the model is unreachable — and never let the
     // reason it was unreachable reach the client, since it may name the key,
     // the upstream host or an internal path.
-    console.error("AI judge unavailable, falling back to the offline judge:", error);
-    return NextResponse.json(judgeOffline(body));
+    log.warn("judge.upstream-unavailable", { error });
+    return NextResponse.json(judgeOffline(body), { headers: NO_STORE });
   }
 }
 

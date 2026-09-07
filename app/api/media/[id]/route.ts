@@ -2,7 +2,9 @@ import { NextResponse } from "next/server";
 import { databaseConfigured } from "@/lib/server/config";
 import { AuthzError, NotFoundError } from "@/lib/server/db/authz";
 import { downloadUrl } from "@/lib/server/media-service";
-import { currentSession } from "@/lib/server/session";
+import { sessionFromRequest } from "@/lib/server/session-cookie";
+import { BUDGETS, callerKey, rateLimit, tooManyRequests } from "@/lib/server/rate-limit";
+import { log } from "@/lib/server/log";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,18 +29,26 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     return NextResponse.json({ error: "No such media." }, { status: 404 });
   }
 
-  const session = await currentSession();
+  const session = await sessionFromRequest(request);
   if (!session) return NextResponse.json({ error: "No session." }, { status: 401 });
+
+  const verdict = rateLimit("mediaRead", callerKey(request, session.sessionId), BUDGETS.mediaRead);
+  if (!verdict.allowed) return tooManyRequests(verdict, "requests");
 
   try {
     const { url, contentType } = await downloadUrl(session, id, new URL(request.url).origin);
-    return NextResponse.json({ url, contentType });
+    // A signed URL is a short-lived capability; a cache would outlive it and
+    // hand it to whoever shares the cache.
+    return NextResponse.json(
+      { url, contentType },
+      { headers: { "cache-control": "no-store, max-age=0" } },
+    );
   } catch (error) {
     if (error instanceof AuthzError || error instanceof NotFoundError) {
       // The same answer whether the media does not exist or is not theirs.
       return NextResponse.json({ error: "No such media." }, { status: 404 });
     }
-    console.error("[api/media/:id] failed", error);
+    log.error("api.media-download-failed", { error });
     return NextResponse.json({ error: "Something went wrong." }, { status: 500 });
   }
 }

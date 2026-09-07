@@ -15,7 +15,9 @@ import {
   touchPresence,
 } from "@/lib/server/db/rooms";
 import { collectAbandonedMedia } from "@/lib/server/db/media";
+import { setRuntimeStatus } from "@/lib/server/runtime-status";
 import { objectStore } from "@/lib/server/storage";
+import { log } from "@/lib/server/log";
 import {
   MAX_MESSAGE_BYTES,
   RateLimiter,
@@ -40,6 +42,19 @@ import {
 const HEARTBEAT_MS = 30_000;
 const PRUNE_INTERVAL_MS = 10 * 60 * 1000;
 
+/**
+ * Ceilings on how much of the server one caller may occupy.
+ *
+ * A socket costs memory whether or not it says anything, and the upgrade is
+ * open to anyone with a session — which anyone can have, since sessions are
+ * free and anonymous by design. Without a cap, one script holds every
+ * connection the process can carry and the room nobody can join is everyone's.
+ *
+ * Generous next to real use: a person has one socket per tab.
+ */
+const MAX_SOCKETS_PER_SESSION = 12;
+const MAX_TOTAL_SOCKETS = Number(process.env.WS_MAX_CONNECTIONS ?? 2_000);
+
 interface Connection {
   id: string;
   socket: WebSocket;
@@ -54,6 +69,8 @@ interface Connection {
 const subscribers = new Map<string, Set<Connection>>();
 /** `${code}:${playerId}` → the connection currently holding that seat. */
 const seats = new Map<string, Connection>();
+/** sessionId → how many sockets it currently holds. */
+const socketsPerSession = new Map<string, number>();
 
 let wss: WebSocketServer | null = null;
 /** Kept so shutdown can detach it. Without this, re-attaching to the same HTTP
@@ -360,7 +377,7 @@ async function handleMessage(conn: Connection, raw: Buffer) {
     }
     // Never let an internal message reach a client; it can name a table, a
     // constraint or a path.
-    console.error("[ws] handler failed", { type: message.t, error });
+    log.error("ws.handler-failed", { type: message.t, error });
     send(conn.socket, { t: "error", reason: "Something went wrong" });
   }
 }
@@ -377,6 +394,8 @@ export function attachRealtime(server: HttpServer, path = "/ws") {
 
   wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
   attachedTo = server;
+  // The health endpoint reports on this, and cannot see this module directly.
+  setRuntimeStatus({ realtime: "listening" });
 
   upgradeListener = (request: IncomingMessage, socket: Duplex, head: Buffer) => {
     let url: URL;
@@ -404,6 +423,16 @@ export function attachRealtime(server: HttpServer, path = "/ws") {
           socket.destroy();
           return;
         }
+        // Counted before the socket exists, so a flood is refused at the
+        // handshake rather than after it has already cost us the memory.
+        const held = socketsPerSession.get(ctx.sessionId) ?? 0;
+        if (held >= MAX_SOCKETS_PER_SESSION || wss!.clients.size >= MAX_TOTAL_SOCKETS) {
+          socket.write("HTTP/1.1 429 Too Many Requests\r\n\r\n");
+          socket.destroy();
+          return;
+        }
+        socketsPerSession.set(ctx.sessionId, held + 1);
+
         wss!.handleUpgrade(request, socket, head, (ws) => {
           const conn: Connection = {
             id: randomUUID(),
@@ -420,8 +449,22 @@ export function attachRealtime(server: HttpServer, path = "/ws") {
           ws.on("message", (data) => {
             void handleMessage(conn, Buffer.isBuffer(data) ? data : Buffer.from(String(data)));
           });
-          ws.on("close", () => void onClose(conn));
-          ws.on("error", () => void onClose(conn));
+          const release = () => {
+            const remaining = (socketsPerSession.get(ctx.sessionId) ?? 1) - 1;
+            if (remaining > 0) socketsPerSession.set(ctx.sessionId, remaining);
+            else socketsPerSession.delete(ctx.sessionId);
+          };
+          let released = false;
+          const onGone = () => {
+            if (!released) {
+              released = true;
+              release();
+            }
+            void onClose(conn);
+          };
+
+          ws.on("close", onGone);
+          ws.on("error", onGone);
 
           send(ws, { t: "hello", sessionId: ctx.sessionId });
         });
@@ -445,7 +488,7 @@ export function attachRealtime(server: HttpServer, path = "/ws") {
   }, HEARTBEAT_MS);
 
   pruner = setInterval(() => {
-    void sweep().catch((error) => console.error("[ws] prune failed", error));
+    void sweep().catch((error) => log.error("ws.prune-failed", { error }));
   }, PRUNE_INTERVAL_MS);
 
   return wss;
@@ -462,8 +505,15 @@ export async function shutdownRealtime(reason = "Server restarting") {
   if (heartbeat) clearInterval(heartbeat);
   if (pruner) clearInterval(pruner);
 
+  // Said before the sockets close, so a health check during a deploy reports
+  // draining rather than healthy.
+  setRuntimeStatus({ realtime: "stopping" });
+
   const server = wss;
-  if (!server) return;
+  if (!server) {
+    setRuntimeStatus({ realtime: "off" });
+    return;
+  }
 
   for (const client of server.clients) {
     send(client as WebSocket, { t: "closing", reason });
@@ -480,7 +530,9 @@ export async function shutdownRealtime(reason = "Server restarting") {
   wss = null;
   subscribers.clear();
   seats.clear();
+  socketsPerSession.clear();
   shuttingDown = false;
+  setRuntimeStatus({ realtime: "off" });
 }
 
 /**
@@ -494,9 +546,7 @@ async function sweep() {
   const strandedKeys = await collectAbandonedMedia();
   if (strandedKeys.length) await objectStore().remove(strandedKeys);
   if (rooms || sessions || strandedKeys.length) {
-    console.log(
-      `[sweep] ${rooms} room(s), ${sessions} session(s), ${strandedKeys.length} object(s)`,
-    );
+    log.info("sweep.collected", { rooms, sessions, objects: strandedKeys.length });
   }
 }
 
@@ -506,5 +556,7 @@ export function realtimeStats() {
     connections: wss?.clients.size ?? 0,
     rooms: subscribers.size,
     seats: seats.size,
+    sessions: socketsPerSession.size,
+    limits: { perSession: MAX_SOCKETS_PER_SESSION, total: MAX_TOTAL_SOCKETS },
   };
 }

@@ -1,150 +1,321 @@
-# Going live
+# Going live on Railway
 
-The path from here, one node at a time. Each step has a way to tell whether it
-worked — don't move on until it says so.
+Every step has a way to tell whether it worked. Don't move on until it says so.
 
 ```
-CURRENT ──> SUPABASE SETUP ──> REAL DATABASE TEST ──> DEPLOY ──> PHONE + LAPTOP ──> PRIVATE BETA
+RAILWAY PROJECT ──> POSTGRES ──> VARIABLES ──> FIRST DEPLOY ──> RESTRICTED ROLE
+        ──> WEBSOCKET URL ──> R2 ──> HEALTH ──> TWO DEVICES ──> PRIVATE BETA
 ```
 
----
+Nothing here contains a real credential, and nothing here asks you to put one in
+a file that Git tracks. Every value goes into Railway's variable settings or
+your local `.env.local`, which is ignored.
 
-## Where you are
-
-Codebase and local tests are done. `npm test` runs 91 assertions — 15 on host
-election, 76 on the RLS policies against an in-process Postgres — and both pass.
-
-That proves the policies are correct **as written**. It cannot prove they are
-correct **as deployed**: that the SQL actually ran, that anonymous sign-in is on,
-that PostgREST enforces what the file says. That is the next two nodes.
+> Supabase is still installed and still works. It is removed at stage 14 of
+> [RAILWAY-MIGRATION-PLAN.md](RAILWAY-MIGRATION-PLAN.md), once this path has run
+> on real infrastructure. Nothing below needs a Supabase key, and
+> `SUPABASE_SERVICE_ROLE_KEY` is not required by anything in the application.
 
 ---
 
-## 1. SUPABASE SETUP — yours to do
+## Before you start
 
-This is the one step I can't do for you. It needs your account, and I shouldn't
-be handling your keys. It's about ten minutes.
-
-1. **Create a project** at supabase.com. Pick a region near you and your tester.
-
-2. **Enable anonymous sign-in.** Authentication → Providers → Anonymous sign-ins.
-   **The entire security model depends on this.** Guests never make an account,
-   so anonymous sessions are what give them an `auth.uid()` for the policies to
-   check. With it off, every room query fails.
-
-3. **Run the schema.** SQL Editor → paste `supabase/schema.sql` → Run. It is
-   written to be safe to run more than once, so if you're unsure, run it again.
-
-4. **Copy the keys** into `.env.local` (copy `.env.example` first):
-   ```
-   NEXT_PUBLIC_SUPABASE_URL=https://<ref>.supabase.co
-   NEXT_PUBLIC_SUPABASE_ANON_KEY=<the anon / public key>
-   ```
-   Project Settings → API. **Use the anon key, not the service role key.** The
-   anon key is meant to be public — every browser gets it — which is exactly why
-   the policies have to hold on their own.
-
-5. Leave `ANTHROPIC_API_KEY` empty for now. The offline judge is good, and an
-   unmetered key behind a public endpoint is the wrong thing to add on the day
-   you first go live. Add it after the beta, with a shared rate limiter.
-
----
-
-## 2. REAL DATABASE TEST
+Locally, from the project root:
 
 ```bash
-npm run test:rls:live
+npm run verify
 ```
 
-Same matrix as the offline suite, but against your project, using nothing but
-the anon key — exactly what a browser has, and exactly what an attacker would
-have. It creates three anonymous visitors, has one host a room and one join it,
-then checks what the third can reach. It cleans up after itself.
+Types, all nine suites, a real build, and a scan of that build for leaked
+secrets. Then the deployment rehearsal — a clean production-only install of the
+built artefacts, booted and driven the way Railway will:
 
-It also checks the two things that go wrong most often at this step, and names
-them specifically: anonymous sign-in still switched off, and the schema not
-actually applied.
+```bash
+npm run check:production
+```
 
-Beyond the offline matrix it verifies two things only a real instance can show:
-concurrent writes are rejected rather than blended, and **a non-member receives
-no realtime changes** for a room they aren't in — realtime is a separate
-enforcement path from PostgREST, and it's the one people forget.
-
-**Do not deploy until this is green.** If anything fails, re-run `schema.sql`
-and check anonymous sign-in.
+Both must pass before any of what follows. They are what makes the rest of this
+document a checklist rather than a hope.
 
 ---
 
-## 3. DEPLOY
+## 1. Create the Railway project
 
-Push to Vercel (or wherever). Set the same two `NEXT_PUBLIC_*` variables in the
-host's environment — they're baked in at build time, so a deploy without them
-silently ships local mode and cross-device rooms won't work.
+1. Sign in at [railway.com](https://railway.com) and create a project.
+2. **Deploy from GitHub repo** → pick this repository → the `railway-migration`
+   branch (or `main`, once merged).
+3. Railway reads [`railway.json`](../railway.json) and does not need any build
+   configuration entered by hand. It says:
 
-Set `NEXT_PUBLIC_SITE_URL` to the deployed origin so invite links and QR codes
-point at the right place.
+   | Setting | Value |
+   |---|---|
+   | Builder | Nixpacks |
+   | Build command | `npm run build` |
+   | Start command | `npm start` |
+   | Health check | `/api/health`, 120s timeout |
+   | Restart policy | on failure, 3 retries |
 
-Then, from the deployed URL:
-- open a room, check the browser console for the anonymous-sign-in warning the
-  client logs if the provider is off;
-- confirm `Profile → Connection` reads `supabase` rather than `local`.
+4. Node version comes from [`.node-version`](../.node-version) and the `engines`
+   field: **Node 20**. Don't override it — the server bundle targets node20.
 
----
-
-## 4. PHONE + LAPTOP
-
-The first test that has never been possible before: two *devices*, not two tabs.
-
-Work through these in order. The first three are the ones most likely to break,
-because they've only ever run against the local transport:
-
-1. **A room across devices.** Create on the laptop, join by code on the phone.
-   Both seats fill.
-2. **Host migration for real.** Lock the phone. Wait past 45 seconds. The laptop
-   takes over and the game continues. Unlock the phone: the laptop keeps it.
-   Locally verified; over a real network with real latency is a different claim.
-3. **Reconnection.** Put the phone in airplane mode mid-game for 20 seconds,
-   then back. No duplicate answers, no lost score, no spurious migration.
-4. **The iOS export.** Photobooth → four photos → Save the strip. This is the
-   path I could not test — no Apple device here. Expect the share sheet. Confirm
-   the strip reaches the camera roll at full size, and that the message on screen
-   matches what actually happened.
-5. **Snap Hunt with a real camera**, which has also never run on real hardware.
-6. **Watch Together** with both devices on the same video.
-7. **375px reality check** — it passes in an emulated viewport, but check the
-   safe-area behaviour on a notched phone. `viewport-fit=cover` is set and there
-   are no `env(safe-area-inset-*)` paddings yet; this is where that shows up.
+**The first deploy will fail.** It has no database and no session secret, and
+the environment check stops it rather than starting something half-configured.
+That is the correct behaviour and the next steps fix it.
 
 ---
 
-## 5. PRIVATE BETA
+## 2. Add PostgreSQL
 
-Before handing it to anyone:
+In the project: **New → Database → Add PostgreSQL**.
 
-- **Schedule room cleanup:**
-  ```sql
-  select cron.schedule('prune-rooms', '17 * * * *', $$select public.prune_stale_rooms()$$);
-  ```
-- **Re-run `npm run test:rls:live` against production** if it's a different
-  project from the one you tested.
-- Decide what you're doing about the MEDIUM findings in `LAUNCH-AUDIT.md` —
-  offline detection and safe-area insets are the two a beta tester will notice.
-- Tell testers plainly that rooms disappear after 24 hours and that anything
-  they keep lives on their own device.
+Railway creates it with its own superuser and exposes `DATABASE_URL` to the
+project. **Do not leave the application pointed at that connection** — step 5
+replaces it. If you do, the app refuses to start in production and tells you so.
 
-**Still true after all of this:** presence writes the whole room document every
-three seconds (audit H4). Fine for a handful of rooms, wrong at scale. Fix it
-before the beta grows, not before it starts.
+Two connection strings matter, from the Postgres service's **Variables** tab:
+
+- `DATABASE_URL` — the private network address (`*.railway.internal`). Use this
+  between services: no egress cost, no public exposure.
+- `DATABASE_PUBLIC_URL` — reachable from your laptop. You need it once, in
+  step 5, and never again.
 
 ---
 
-## Correction to `LAUNCH-BLOCKERS-FIXED.md`
+## 3. Configure variables
 
-That report's security sweep said `service_role` had **no occurrences anywhere**.
-That was overstated — my search covered `.ts`, `.tsx`, `.sql`, `.json` and `.md`,
-and missed dotfiles. `SUPABASE_SERVICE_ROLE_KEY` appears in `.env.example`, as an
-empty, documented placeholder marked server-only.
+On the **application** service → **Variables**. Full descriptions are in
+[`.env.example`](../.env.example), grouped the same way.
 
-No key is present and nothing reads that variable, so the conclusion holds. The
-claim was wrong; the finding wasn't. Worth knowing since you're about to fill
-that file in — **leave it empty.**
+### Required
+
+| Variable | Where it comes from |
+|---|---|
+| `DATABASE_URL` | Set in step 5 to the `together_app` connection. Until then, reference Postgres's own: `${{Postgres.DATABASE_URL}}` |
+| `MIGRATE_DATABASE_URL` | The **owner** connection: `${{Postgres.DATABASE_URL}}`. Used only to run migrations on boot |
+| `SESSION_SECRET` | Generate: `openssl rand -hex 32`. 32 characters minimum, or the app refuses to start |
+| `NEXT_PUBLIC_WS_URL` | Set in step 6, once you have the public domain. Must be `wss://` |
+
+`PORT` is injected by Railway. Do not set it. The server binds `process.env.PORT`
+on `0.0.0.0`, which is what the platform expects.
+
+### Recommended
+
+| Variable | Value |
+|---|---|
+| `NEXT_PUBLIC_SITE_URL` | `https://<your-app>.up.railway.app` — invite links and QR codes |
+| `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` | Step 7. All four together or none |
+| `ANTHROPIC_API_KEY` | Optional. Without it, Debate and Couples Court use the offline judge |
+
+### Leave unset
+
+`DB_ROLE_ENFORCEMENT` — local rehearsal only. Setting it in production turns off
+the check that keeps a bug in the authorization code from becoming a breach.
+
+`SESSION_SECRET_PREVIOUS` — only for one deploy after rotating the secret.
+
+> **Never** prefix a secret with `NEXT_PUBLIC_`. That prefix means "compile this
+> into the page source". `npm run check:db` fails the build for secret-shaped
+> `NEXT_PUBLIC_` names, and `npm run check:bundle` greps the built output.
+
+---
+
+## 4. First real deploy, and the migrations
+
+Push, or hit **Deploy**. Migrations run automatically on boot, before the
+process listens, using `MIGRATE_DATABASE_URL`:
+
+- an advisory lock, so two instances starting together don't race
+- a ledger (`schema_migrations`), so nothing runs twice
+- each file in its own transaction, so a failure leaves the last good state
+
+Railway holds traffic on the previous deployment until `/api/health` passes, so
+a failed migration cannot take the site down.
+
+**Verify** — in the deploy logs, one JSON line per event:
+
+```
+{"level":"info","event":"boot.migrated","applied":3}
+{"level":"info","event":"boot.realtime","path":"/ws"}
+{"level":"info","event":"boot.ready","hostname":"0.0.0.0","port":8080}
+```
+
+If you ever need to run them by hand:
+
+```bash
+MIGRATE_DATABASE_URL='<owner connection>' npm run db:migrate
+```
+
+---
+
+## 5. Create the restricted application role
+
+This is the step that makes the authorization model hold when the application
+code is wrong. Do not skip it — in production the app checks and refuses to
+start on a privileged connection.
+
+1. Open [`db/role.sql`](../db/role.sql) and replace `REPLACE_ME` with a password
+   you generate (`openssl rand -hex 24`). Do not save that edit into Git.
+2. Run it once against the database, as the owner. Either paste it into
+   Railway's Postgres **Data → Query** tab, or:
+
+   ```bash
+   psql '<DATABASE_PUBLIC_URL>' -f db/role.sql
+   ```
+
+3. Build the application's connection string from the owner's, replacing the
+   user and password with `together_app` and the password from step 1, keeping
+   the same host, port and database name.
+4. Set the app's `DATABASE_URL` to that string. Leave `MIGRATE_DATABASE_URL`
+   as the owner.
+5. Redeploy.
+
+**Verify** — the deploy logs show:
+
+```
+{"level":"info","event":"boot.database-role","role":"together_app","restricted":true}
+```
+
+If it says `restricted:false`, or the deploy fails with
+`PrivilegedConnectionError`, the app is still on the owner connection. What the
+role can and cannot do is covered by `npm run test:deploy`, which runs
+`db/role.sql` against a real schema and then tries to break out of it.
+
+---
+
+## 6. Public URL and the WebSocket
+
+1. Application service → **Settings → Networking → Generate Domain**. You get
+   `https://<something>.up.railway.app`.
+2. Set on the application service:
+   - `NEXT_PUBLIC_WS_URL` = `wss://<something>.up.railway.app/ws`
+   - `NEXT_PUBLIC_SITE_URL` = `https://<something>.up.railway.app`
+3. Redeploy. Both are compiled into the browser bundle at build time, so a
+   change to either needs a rebuild, not just a restart.
+
+Notes that matter:
+
+- **`wss://`, not `ws://`.** The app refuses to start on `ws://` in production —
+  an unencrypted socket would carry the session cookie in the clear.
+- **Not `localhost`.** The app refuses that too. In a browser it means the
+  visitor's own machine.
+- **Same host as the site.** HTTP and the socket are one service on one port
+  (Decision C). Railway's proxy handles the upgrade on `/ws` with no extra
+  configuration. Splitting them later is an environment variable, because the
+  browser is told where to connect rather than assuming same-origin.
+
+---
+
+## 7. Cloudflare R2
+
+Without this, photos are written to the container's disk and **lost on every
+deploy**. The app boots and warns; it does not stop you. Photobooth and Snap
+Hunt are the features that depend on it.
+
+1. Cloudflare dashboard → **R2 → Create bucket**. Any name.
+2. **Keep it private.** No public access, no custom public domain. Every read
+   and write goes through a URL this server signs for one object, for a few
+   minutes.
+3. **Manage R2 API Tokens → Create API token**, permission **Object Read &
+   Write**, scoped to that bucket.
+4. Set on the application service: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
+   `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`. All four, or the app refuses to start —
+   three of four is a deployment that silently writes to disk.
+
+**Verify** — logs show `"storage":"r2"` rather than `"local-disk"`, then take a
+photo in Photobooth on one device and confirm it appears on the other.
+
+> Untested until you do this: the R2 adapter is written, typechecked and covered
+> against a local adapter with real bytes and real signatures, but it has never
+> moved a byte to Cloudflare. This is the first time it will.
+
+---
+
+## 8. Health check
+
+`GET /api/health` answers for each part separately and is only healthy when all
+of them are:
+
+```json
+{
+  "ok": true,
+  "mode": "hosted",
+  "checks": { "database": true, "migrations": "ready", "realtime": "listening" },
+  "uptimeSeconds": 42
+}
+```
+
+- **200** — serving.
+- **503** — something named in `checks` is not ready. Railway holds traffic on
+  the previous deployment.
+
+It deliberately reveals nothing about the deployment: no host names, no
+versions, no counts, no role names. It is uncacheable at every layer.
+
+```bash
+curl -i https://<your-app>.up.railway.app/api/health
+```
+
+---
+
+## 9. Two devices, two networks
+
+The step that finds what nothing local can. Phone on mobile data, laptop on
+wifi — **not** the same wifi, or you are testing your router.
+
+1. Laptop: open the site, start a room, note the code.
+2. Phone: join with the code.
+3. Both see each other in the lobby, with names and presence.
+4. Play a round of something turn-based (Know Me), something realtime (Draw
+   Together), and something with a photo (Photobooth).
+5. Put the phone in flight mode for 30 seconds, then bring it back. It should
+   reconnect and resynchronise without losing the room.
+6. Redeploy while both are connected. Both should report reconnecting and then
+   recover — the server tells clients before it closes their sockets.
+
+---
+
+## 10. Rollback
+
+**Fastest — a bad deploy.** Railway keeps every previous deployment. Project →
+**Deployments** → the last good one → **Redeploy**. It takes about a minute and
+does not touch the database.
+
+**A bad environment variable.** Fix it in **Variables** and redeploy. Anything
+`NEXT_PUBLIC_` needs a rebuild, not a restart.
+
+**A bad migration.** Migrations are forward-only by design — there are no down
+scripts, because a down script that has never been run is not a rollback plan.
+Recovery is:
+
+1. Redeploy the previous version. It will not re-run the new migration, and
+   `if not exists` means the schema being ahead is usually harmless.
+2. If the schema change is genuinely incompatible, restore the database from a
+   Railway backup, then redeploy the previous version.
+
+Take a backup before any deploy carrying a migration:
+**Postgres service → Backups → Create backup**.
+
+**Rotating a leaked secret.** `SESSION_SECRET`: set `SESSION_SECRET_PREVIOUS`
+to the old value and `SESSION_SECRET` to a new one, deploy, then remove the
+previous one on the next deploy — nobody is signed out. R2 keys: create a new
+token, update all four variables, deploy, then delete the old token. Database:
+`alter role together_app with password '...'`, update `DATABASE_URL`, deploy.
+
+---
+
+## What this costs
+
+At ~100 monthly actives: **~$10/month** — roughly $6 for the web service, $4 for
+Postgres, R2 inside its free tier. The Hobby plan is $5/month including $5 of
+usage, so expect about $5 of overage. Section 15 of the migration plan has the
+figures for 1,000 and 10,000 users (~$25 and ~$125).
+
+---
+
+## Known limits at this scale
+
+- **Rate limits are per-process.** One instance is the whole picture; behind
+  replicas they thin traffic rather than cap it. Revisit before scaling out.
+- **One instance is the assumption.** Sockets, presence bookkeeping and the AI
+  spend ceiling all live in the process. Two instances need a shared store.
+- **Media is R2 or nothing.** Container disks are ephemeral.

@@ -18,18 +18,16 @@ import { createServer, type Server } from "node:http";
 import { AddressInfo } from "node:net";
 import { PGlite } from "@electric-sql/pglite";
 import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
-import { PGLiteSocketServer } from "@electric-sql/pglite-socket";
+import { startPgSocket } from "../testing/pg-socket.mts";
 import WebSocket from "ws";
 import { migrate } from "../../../db/migrate.mjs";
 
 // --- a real Postgres on a real socket --------------------------------------
 
 const db = await PGlite.create({ extensions: { pgcrypto } });
-const PG_PORT = 55_432 + Math.floor(Math.random() * 200);
-const pgServer = new PGLiteSocketServer({ db, port: PG_PORT, host: "127.0.0.1" });
-await pgServer.start();
+const pgSocket = await startPgSocket(db);
 
-process.env.DATABASE_URL = `postgres://postgres:postgres@127.0.0.1:${PG_PORT}/postgres`;
+process.env.DATABASE_URL = pgSocket.url;
 // PGlite's wire server serves one connection at a time, so the pool is pinned to
 // one here. Concurrency is still exercised — the compare-and-set tests interleave
 // two clients' writes — it is just serialised at the socket rather than the pool.
@@ -577,7 +575,7 @@ for (const c of [a, m, m2, probe, probe2, probe3, probe4, bAgain, late, dup, flo
   }
 }
 await new Promise<void>((r) => http.close(() => r()));
-await pgServer.stop();
+await pgSocket.server.stop();
 await db.close();
 
 console.log(`\n${pass} passed, ${failures.length} failed`);

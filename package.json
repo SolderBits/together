@@ -10,15 +10,21 @@
     "typecheck": "tsc --noEmit",
     "test:rls": "node supabase/rls.test.mjs",
     "test:election": "tsx lib/rooms/election.test.ts",
-    "test": "npm run check:db && npm run test:session && npm run test:realtime && npm run test:transport && npm run test:media && npm run test:photobooth && npm run test:election && npm run test:rls",
+    "test": "npm run check:db && npm run test:session && npm run test:realtime && npm run test:transport && npm run test:media && npm run test:photobooth && npm run test:security && npm run test:deploy && npm run test:election && npm run test:rls",
+    "verify": "npm run typecheck && npm test && npm run check:bundle",
+    "predeploy": "npm run verify && npm run check:production",
     "test:rls:live": "node supabase/rls.live.test.mjs",
     "check:db": "node scripts/check-db-access.mjs",
+    "check:bundle": "node scripts/check-bundle.mjs",
+    "check:production": "node scripts/check-production.mjs",
     "db:migrate": "node db/migrate.mjs",
     "test:session": "tsx lib/server/session-token.test.mts",
     "test:realtime": "NODE_OPTIONS=--conditions=react-server tsx lib/server/ws/realtime.test.mts",
     "test:transport": "NODE_OPTIONS=--conditions=react-server tsx lib/realtime/railway-transport.test.mts",
     "test:media": "NODE_OPTIONS=--conditions=react-server tsx lib/server/storage/media.test.mts",
     "test:photobooth": "NODE_OPTIONS=--conditions=react-server tsx lib/media/photobooth-flow.test.mts",
+    "test:security": "NODE_OPTIONS=--conditions=react-server tsx lib/server/security.test.mts",
+    "test:deploy": "NODE_OPTIONS=--conditions=react-server tsx lib/server/deployment.test.mts",
     "dev:railway": "NODE_OPTIONS=--conditions=react-server tsx scripts/dev-railway.mjs"
   },
   "dependencies": {
@@ -27,12 +33,13 @@
     "@supabase/ssr": "^0.5.2",
     "@supabase/supabase-js": "^2.45.4",
     "jose": "^6.2.12",
-    "next": "15.5.4",
+    "next": "15.5.25",
     "pg": "^8.23.0",
     "qrcode": "^1.5.4",
     "react": "19.1.0",
     "react-dom": "19.1.0",
-    "server-only": "^0.0.1"
+    "server-only": "^0.0.1",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.8",
@@ -44,10 +51,17 @@
     "@types/react-dom": "^19.1.0",
     "@types/ws": "^8.18.1",
     "autoprefixer": "^10.4.20",
+    "esbuild": "^0.28.2",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.14",
     "tsx": "^4.23.13",
-    "typescript": "^5.6.3",
-    "ws": "^8.21.3"
+    "typescript": "^5.6.3"
+  },
+  "overrides": {
+    "sharp": "^0.35.0",
+    "postcss": "$postcss"
+  },
+  "engines": {
+    "node": ">=20.9.0 <23"
   }
 }

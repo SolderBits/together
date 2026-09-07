@@ -2,7 +2,9 @@ import { NextResponse } from "next/server";
 import { databaseConfigured } from "@/lib/server/config";
 import { AuthzError } from "@/lib/server/db/authz";
 import { beginUpload, finishUpload } from "@/lib/server/media-service";
-import { currentSession } from "@/lib/server/session";
+import { sessionFromRequest } from "@/lib/server/session-cookie";
+import { BUDGETS, callerKey, rateLimit, tooManyRequests } from "@/lib/server/rate-limit";
+import { log } from "@/lib/server/log";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,10 +29,14 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "That request is too large." }, { status: 413 });
   }
 
-  const session = await currentSession();
+  const session = await sessionFromRequest(request);
   if (!session) {
     return NextResponse.json({ error: "No session." }, { status: 401 });
   }
+
+  // Every ticket is a row and, once used, an object that costs money to keep.
+  const verdict = rateLimit("media", callerKey(request, session.sessionId), BUDGETS.media);
+  if (!verdict.allowed) return tooManyRequests(verdict, "uploads");
 
   let body: Record<string, unknown>;
   try {
@@ -66,7 +72,7 @@ export async function POST(request: Request) {
     if (error instanceof AuthzError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
-    console.error("[api/media] failed", error);
+    log.error("api.media-failed", { error });
     return NextResponse.json({ error: "Something went wrong." }, { status: 500 });
   }
 }

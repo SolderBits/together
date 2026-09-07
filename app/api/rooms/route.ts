@@ -3,11 +3,11 @@ import type { RoomState } from "@/lib/rooms/types";
 import { databaseConfigured } from "@/lib/server/config";
 import { AuthzError } from "@/lib/server/db/authz";
 import { createRoom, joinRoom, readRoom } from "@/lib/server/db/rooms";
-import {
-  SESSION_COOKIE,
-  cookieOptions,
-  currentOrNewSession,
-} from "@/lib/server/session";
+import { SESSION_COOKIE, cookieOptions, mintToken } from "@/lib/server/session-token";
+import { sessionFromRequest } from "@/lib/server/session-cookie";
+import { createSession } from "@/lib/server/db/sessions";
+import { BUDGETS, callerKey, rateLimit, tooManyRequests } from "@/lib/server/rate-limit";
+import { log } from "@/lib/server/log";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -56,10 +56,18 @@ export async function POST(request: Request) {
 
   // Session first: everything below is scoped to it, and a first-time visitor
   // needs one minted before they can own anything.
-  const { ctx, freshToken } = await currentOrNewSession();
+  const existing = await sessionFromRequest(request);
+  const verdict = rateLimit("room", callerKey(request, existing?.sessionId), BUDGETS.room);
+  if (!verdict.allowed) return tooManyRequests(verdict, "rooms");
+
+  const ctx = existing ?? { sessionId: (await createSession()).id };
+  const freshToken = existing ? null : await mintToken(ctx.sessionId);
 
   const respond = (payload: unknown, status = 200) => {
-    const response = NextResponse.json(payload, { status });
+    const response = NextResponse.json(payload, {
+      status,
+      headers: { "cache-control": "no-store, max-age=0" },
+    });
     if (freshToken) response.cookies.set(SESSION_COOKIE, freshToken, cookieOptions());
     return response;
   };
@@ -100,7 +108,7 @@ export async function POST(request: Request) {
         return respond({ error: "That room code is taken." }, 409);
       }
     }
-    console.error("[api/rooms] failed", error);
+    log.error("api.rooms-failed", { error });
     return respond({ error: "Something went wrong." }, 500);
   }
 }

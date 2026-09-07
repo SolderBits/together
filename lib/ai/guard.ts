@@ -96,9 +96,43 @@ export function rateLimit(key: string, now = Date.now()) {
   return { allowed: true, retryAfterSeconds: 0 };
 }
 
-/** Only for tests — the counter is process-wide by design. */
+/**
+ * A ceiling on what this process will spend upstream, whoever is asking.
+ *
+ * The per-caller limit above counts against `x-forwarded-for`, which the caller
+ * sets. Rotating it defeats that limit completely — measured, before this
+ * existed: 5000 requests from one machine, 5000 allowed, every one of them a
+ * paid model call. No per-caller scheme can fix that, because there is nothing
+ * trustworthy to count against on an endpoint with no sign-in.
+ *
+ * So the bound is on the total instead. Past it the offline judge answers,
+ * which is the same thing that happens when the model is unreachable — players
+ * still get a verdict, and the bill has a roof on it.
+ */
+export const MAX_AI_CALLS_PER_WINDOW = Math.max(
+  1,
+  Number(process.env.AI_CALLS_PER_MINUTE ?? 120),
+);
+
+let upstreamWindowEndsAt = 0;
+let upstreamThisWindow = 0;
+
+/** Take one slot for an upstream call, or refuse. */
+export function claimAiCall(now = Date.now()): boolean {
+  if (now >= upstreamWindowEndsAt) {
+    upstreamWindowEndsAt = now + WINDOW_MS;
+    upstreamThisWindow = 0;
+  }
+  if (upstreamThisWindow >= MAX_AI_CALLS_PER_WINDOW) return false;
+  upstreamThisWindow += 1;
+  return true;
+}
+
+/** Only for tests — both counters are process-wide by design. */
 export function resetRateLimit() {
   hits.clear();
+  upstreamWindowEndsAt = 0;
+  upstreamThisWindow = 0;
 }
 
 /**

@@ -34,7 +34,7 @@ const ALLOWED_OUTSIDE = [
 const SEARCH_DIRS = ["app", "components", "lib", "db", "server", "scripts"];
 const EXTENSIONS = [".ts", ".tsx", ".mjs", ".js"];
 
-function walk(dir, out = []) {
+function walk(dir, out = [], extensions = EXTENSIONS) {
   let entries;
   try {
     entries = readdirSync(dir);
@@ -44,8 +44,8 @@ function walk(dir, out = []) {
   for (const entry of entries) {
     if (entry === "node_modules" || entry === ".next" || entry.startsWith(".")) continue;
     const full = join(dir, entry);
-    if (statSync(full).isDirectory()) walk(full, out);
-    else if (EXTENSIONS.some((e) => entry.endsWith(e))) out.push(full);
+    if (statSync(full).isDirectory()) walk(full, out, extensions);
+    else if (extensions.some((e) => entry.endsWith(e))) out.push(full);
   }
   return out;
 }
@@ -135,12 +135,136 @@ try {
   violations.push([".env.example", "missing"]);
 }
 
+// --- no credential may be committed as a literal ---------------------------
+/*
+ * `.env.local` is ignored and `.env.example` holds only empty placeholders, so
+ * a secret can realistically only arrive here by being pasted into source. A
+ * grep for the shapes catches that on the way in, when it is still a diff and
+ * not a rotation.
+ */
+const CREDENTIAL_SHAPES = [
+  // A credential pointing at this machine is a development default, not a
+  // secret — `postgres:postgres@127.0.0.1` is how PGlite and every local
+  // Postgres ship. Anything pointing somewhere else is real.
+  [
+    /postgres(ql)?:\/\/[A-Za-z0-9_.-]+:[^@\s"'`$;{)]{3,}@(?!localhost|127\.0\.0\.1|\$|\{)/,
+    "a database URL with a password in it",
+  ],
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----/, "a private key"],
+  [/\bsk-ant-(?!test|CANARY)[A-Za-z0-9_-]{12,}/, "an Anthropic API key"],
+  [/\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\./, "a signed JWT (a Supabase key looks like this)"],
+  [/\bAKIA[0-9A-Z]{16}\b/, "an AWS access key id"],
+];
+
+/**
+ * Files whose job is to name these shapes rather than contain one.
+ *
+ * Kept short and explicit. Every entry is a file that would otherwise flag
+ * itself, and adding one is a visible line in a diff — which is the point,
+ * because this list is also the only place a real secret could now hide.
+ */
+const SCANNER_FILES = [
+  join("scripts", "check-db-access.mjs"),
+  join("scripts", "check-bundle.mjs"),
+  join("scripts", "check-production.mjs"),
+  join("lib", "server", "env.ts"),
+  join("lib", "server", "log.ts"),
+  // Its fixtures are deliberately credential-shaped: it proves the logger
+  // redacts them.
+  join("lib", "server", "deployment.test.mts"),
+];
+
+/*
+ * Scanned wider than the other checks. The rules above are about application
+ * structure and stop at the code that ships; a pasted credential is a problem
+ * wherever it lands, and a test file is exactly where one gets left behind.
+ */
+const credentialFiles = SEARCH_DIRS.flatMap((d) => walk(join(root, d), [], [".mts", ".mjs", ".ts", ".tsx", ".js", ".sql"]));
+
+for (const file of credentialFiles) {
+  const rel = relative(root, file);
+  if (SCANNER_FILES.includes(rel)) continue;
+  const source = readFileSync(file, "utf8");
+  for (const [shape, what] of CREDENTIAL_SHAPES) {
+    if (shape.test(source)) violations.push([rel, `contains what looks like ${what}`]);
+  }
+}
+
+// --- every API route states whether it is public ---------------------------
+/*
+ * The failure this prevents: a new endpoint that reads room data and simply
+ * never asks who is calling. Nothing about writing a route handler forces that
+ * question, so this asks it — a route either consults the session or is named
+ * below as deliberately open, and adding one to that list is a visible line in
+ * a diff rather than an omission nobody sees.
+ */
+const PUBLIC_ROUTES = {
+  [join("app", "api", "health", "route.ts")]:
+    "a liveness probe, and it deliberately reveals nothing about the deployment",
+  [join("app", "api", "judge", "route.ts")]:
+    "players are never asked to sign in; defended by size caps, a per-caller limit and a ceiling on upstream spend",
+  [join("app", "api", "media", "blob", "route.ts")]:
+    "the signed URL is the capability, exactly as with R2; /api/media is what decides who gets one",
+};
+
+for (const file of files) {
+  const rel = relative(root, file);
+  if (!rel.startsWith(join("app", "api")) || !rel.endsWith(`${sep}route.ts`)) continue;
+  const source = readFileSync(file, "utf8");
+  const checksSession = /sessionFromRequest|currentSession|currentOrNewSession/.test(source);
+  if (checksSession && PUBLIC_ROUTES[rel]) {
+    violations.push([rel, "is listed as public but checks a session — remove it from PUBLIC_ROUTES"]);
+  }
+  if (!checksSession && !PUBLIC_ROUTES[rel]) {
+    violations.push([
+      rel,
+      "never looks at the session. Call sessionFromRequest, or add it to PUBLIC_ROUTES\n" +
+        "    in this script with the reason it is safe to leave open.",
+    ]);
+  }
+}
+
+// --- nothing that only exists for development may ship ---------------------
+/*
+ * A debug endpoint is written to be temporary and then is not. These are the
+ * shapes they take — a route whose name says it, or one that dumps state — and
+ * the cheapest moment to catch one is before it is deployed rather than after
+ * someone finds it.
+ */
+const DEV_ROUTE_NAMES = /(^|[/\\])(debug|test|_test|dev|_dev|internal|admin|probe|__)[/\\]/i;
+
+for (const file of files) {
+  const rel = relative(root, file);
+  if (!rel.startsWith(join("app", "api")) || !rel.endsWith(`${sep}route.ts`)) continue;
+  if (DEV_ROUTE_NAMES.test(rel)) {
+    violations.push([rel, "looks like a debug or test endpoint. Production has no use for one."]);
+  }
+  const source = readFileSync(file, "utf8");
+  if (/NextResponse\.json\(\s*process\.env|JSON\.stringify\(process\.env/.test(source)) {
+    violations.push([rel, "returns the process environment"]);
+  }
+}
+
+// --- the ignore rules that keep secrets out of Git -------------------------
+try {
+  const ignored = readFileSync(join(root, ".gitignore"), "utf8");
+  for (const rule of [".env.local", ".env"]) {
+    if (!ignored.split("\n").some((line) => line.trim() === rule)) {
+      violations.push([".gitignore", `does not ignore ${rule}`]);
+    }
+  }
+} catch {
+  violations.push([".gitignore", "missing"]);
+}
+
 if (violations.length) {
   console.log(`\n${violations.length} violation(s):\n`);
   for (const [where, why] of violations) console.log(`  ${where}\n    ${why}`);
   console.log(
-    "\nThe database is reachable only through lib/server/db/, which is what makes the\n" +
-      "authorization gates unbypassable. Route this through a function there instead.\n",
+    "\nThese are the structural protections that replaced row-level security. Each one\n" +
+      "holds a property that review alone cannot: the database has one door, SQL takes\n" +
+      "no interpolated values, secrets stay server-side, and no endpoint is open by\n" +
+      "accident. Fix the cause rather than the check.\n",
   );
   process.exit(1);
 }
@@ -149,3 +273,9 @@ console.log(`  ok    database access confined to lib/server/db/ (${files.length}
 console.log("  ok    no interpolated values in SQL");
 console.log("  ok    no server-only env read from a client component");
 console.log("  ok    no secret-shaped NEXT_PUBLIC_ name");
+console.log("  ok    no credential committed as a literal");
+console.log(
+  `  ok    every API route checks a session or is declared public (${Object.keys(PUBLIC_ROUTES).length} declared)`,
+);
+console.log("  ok    no debug, test or environment-dumping endpoints");
+console.log("  ok    .gitignore keeps env files out of Git");
