@@ -7,6 +7,12 @@ different time zones.
 One person starts a room and gets a six-character code plus an invite link. The
 other opens it. Nobody needs an account.
 
+> **Picking this repository up?** Start with [CLAUDE.md](CLAUDE.md) — the
+> current architecture, project state, and the rules that are not up for
+> renegotiation. The backend sections below still describe Supabase and predate
+> the Railway migration; where they disagree with `CLAUDE.md` or `docs/`, those
+> are current.
+
 > **`Together` is a placeholder name.** It appears in exactly two places:
 > `lib/site.ts` (the product name and taglines) and `components/layout/brand.tsx`
 > (the wordmark and mark). Change those two files and the whole app is renamed.
